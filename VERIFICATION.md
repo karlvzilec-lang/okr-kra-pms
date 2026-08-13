@@ -319,3 +319,466 @@ rollback;
 ```
 
 The corresponding category-weight test is the same shape: change one seeded category from `60.00` to `60.01`, call `validate_goal_plan_weights`, expect a category total of `100.01`, then roll back.
+
+# Phase 2 verification
+
+Run these after migrations `0005` through `0010` and the Phase 2 seed additions.
+As in Phase 1, run transactions containing an expected error separately so an
+intentional RLS rejection does not abort later checks.
+
+## RLS is enabled on every Phase 2 table
+
+Run as the database owner. All six rows must return `rowsecurity = true`.
+
+```sql
+select relname, relrowsecurity as rowsecurity
+from pg_class
+where relnamespace = 'public'::regnamespace
+  and relname in (
+    'objective', 'key_result', 'check_in', 'objective_alignment',
+    'review_participant_scope', 'goal_matrix_rating'
+  )
+order by relname;
+```
+
+## Matrix ratings require the exact participant-scope join
+
+This positive case discovers the seeded matrix manager and their category grant,
+temporarily moves the cycle to `manager_eval`, removes the seeded advisory row,
+and recreates a rating as that matrix manager. It must return one row.
+
+```sql
+begin;
+update public.review_cycle as rc
+set status = 'manager_eval'
+where rc.id = (
+  select egp.review_cycle_id
+  from public.review_participant as rp
+  join public.review_participant_scope as rps
+    on rps.review_participant_id = rp.id
+  join public.employee_goal_plan as egp
+    on egp.id = rp.employee_goal_plan_id
+  where rp.role::text = 'matrix_manager'
+    and rps.scope_type::text = 'kra_category'
+  limit 1
+);
+
+delete from public.goal_matrix_rating as gmr
+where gmr.participant_id = (
+  select rp.participant_id
+  from public.review_participant as rp
+  join public.review_participant_scope as rps
+    on rps.review_participant_id = rp.id
+  where rp.role::text = 'matrix_manager'
+    and rps.scope_type::text = 'kra_category'
+  limit 1
+);
+
+select set_config(
+  'request.jwt.claim.sub',
+  (
+    select rp.participant_id::text
+    from public.review_participant as rp
+    join public.review_participant_scope as rps
+      on rps.review_participant_id = rp.id
+    where rp.role::text = 'matrix_manager'
+      and rps.scope_type::text = 'kra_category'
+    limit 1
+  ),
+  true
+);
+set local role authenticated;
+
+insert into public.goal_matrix_rating (
+  goal_id, participant_id, rating, comment
+)
+select g.id, auth.uid(), 4.25, 'Scoped matrix verification'
+from public.review_participant as rp
+join public.review_participant_scope as rps
+  on rps.review_participant_id = rp.id
+join public.goal as g on g.kra_category_id = rps.scope_id
+where rp.participant_id = auth.uid()
+  and rp.role::text = 'matrix_manager'
+  and rps.scope_type::text = 'kra_category'
+order by g.id
+limit 1
+returning goal_id, participant_id, rating;
+-- 1 row
+rollback;
+```
+
+A goal in another category on the same plan must fail even though the caller
+still has a bare `matrix_manager` participant row. This is the regression guard
+for the exact `review_participant -> review_participant_scope` join.
+
+```sql
+begin;
+update public.review_cycle as rc
+set status = 'manager_eval'
+where rc.id = (
+  select egp.review_cycle_id
+  from public.review_participant as rp
+  join public.review_participant_scope as rps
+    on rps.review_participant_id = rp.id
+  join public.employee_goal_plan as egp
+    on egp.id = rp.employee_goal_plan_id
+  where rp.role::text = 'matrix_manager'
+    and rps.scope_type::text = 'kra_category'
+  limit 1
+);
+
+select set_config(
+  'request.jwt.claim.sub',
+  (
+    select rp.participant_id::text
+    from public.review_participant as rp
+    where rp.role::text = 'matrix_manager'
+    limit 1
+  ),
+  true
+);
+set local role authenticated;
+
+insert into public.goal_matrix_rating (
+  goal_id, participant_id, rating, comment
+)
+select g.id, auth.uid(), 4.00, 'Must be rejected: unscoped category'
+from public.review_participant as rp
+join public.review_participant_scope as rps
+  on rps.review_participant_id = rp.id
+join public.kra_category as scoped_category
+  on scoped_category.id = rps.scope_id
+join public.kra_category as other_category
+  on other_category.employee_goal_plan_id = rp.employee_goal_plan_id
+ and other_category.id <> scoped_category.id
+join public.goal as g on g.kra_category_id = other_category.id
+where rp.participant_id = auth.uid()
+  and rp.role::text = 'matrix_manager'
+  and rps.scope_type::text = 'kra_category'
+order by g.id
+limit 1;
+-- ERROR: new row violates row-level security policy
+rollback;
+```
+
+The scoped matrix manager also cannot write the line manager's columns on
+`goal`. This must affect zero rows; their only rating write path is
+`goal_matrix_rating`.
+
+```sql
+begin;
+update public.review_cycle as rc
+set status = 'manager_eval'
+where rc.id = (
+  select egp.review_cycle_id
+  from public.review_participant as rp
+  join public.review_participant_scope as rps
+    on rps.review_participant_id = rp.id
+  join public.employee_goal_plan as egp
+    on egp.id = rp.employee_goal_plan_id
+  where rp.role::text = 'matrix_manager'
+    and rps.scope_type::text = 'kra_category'
+  limit 1
+);
+
+select set_config(
+  'request.jwt.claim.sub',
+  (
+    select rp.participant_id::text
+    from public.review_participant as rp
+    where rp.role::text = 'matrix_manager'
+    limit 1
+  ),
+  true
+);
+set local role authenticated;
+
+update public.goal as g
+set manager_rating = 1.00
+where g.id = (
+  select scoped_goal.id
+  from public.review_participant as rp
+  join public.review_participant_scope as rps
+    on rps.review_participant_id = rp.id
+  join public.goal as scoped_goal on scoped_goal.kra_category_id = rps.scope_id
+  where rp.participant_id = auth.uid()
+    and rp.role::text = 'matrix_manager'
+    and rps.scope_type::text = 'kra_category'
+  order by scoped_goal.id
+  limit 1
+)
+returning g.id;
+-- UPDATE 0
+rollback;
+```
+
+## Ruling 1: objective reads point upward
+
+Dara can read Ana's objective because Dara's `manager_id` is Ana's id. Delete
+the seeded alignment as owner, prove Dara is not a participant on Ana's plan,
+then recreate the upward link as Dara. Child write authority plus parent read
+authority is sufficient; participation in both plans is deliberately not
+required.
+
+```sql
+begin;
+delete from public.objective_alignment as oa
+where oa.child_objective_id in (
+  select o.id
+  from public.objective as o
+  where o.owner_id = '11111111-1111-4111-8111-000000000004'
+);
+
+select not exists (
+  select 1
+  from public.review_participant as rp
+  where rp.employee_goal_plan_id = '33333333-3333-4333-8333-00000000000b'
+    and rp.participant_id = '11111111-1111-4111-8111-000000000004'
+) as dara_is_not_on_ana_plan;
+-- true
+
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000004',
+  true
+);
+
+select o.id
+from public.objective as o
+where o.owner_id = '11111111-1111-4111-8111-000000000002';
+-- Ana's parent objective is visible to Dara.
+
+insert into public.objective_alignment (
+  parent_objective_id, child_objective_id, created_by
+)
+select parent.id, child.id, auth.uid()
+from public.objective as parent
+cross join public.objective as child
+where parent.owner_id = '11111111-1111-4111-8111-000000000002'
+  and child.owner_id = '11111111-1111-4111-8111-000000000004'
+order by parent.id, child.id
+limit 1
+returning id;
+-- 1 row
+rollback;
+```
+
+The reverse is not granted: Ana is Dara's manager, but Ruling 1 does not let a
+caller read a direct report's objective merely because of that relationship.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000002',
+  true
+);
+
+select o.id
+from public.objective as o
+where o.owner_id = '11111111-1111-4111-8111-000000000004';
+-- 0 rows
+rollback;
+```
+
+## Check-ins propagate values and recompute scores
+
+Insert a check-in at exactly 70% of a non-degenerate key result's range. The
+AFTER INSERT trigger must update `current_value`; that update must fire the
+BEFORE trigger and store a score of `0.700`.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000004',
+  true
+);
+
+insert into public.check_in (key_result_id, checked_in_by, new_value, note)
+select
+  kr.id,
+  auth.uid(),
+  kr.start_value + (0.7::numeric * (kr.target_value - kr.start_value)),
+  '70 percent trigger verification'
+from public.key_result as kr
+join public.objective as o on o.id = kr.objective_id
+where o.owner_id = auth.uid()
+  and kr.target_value <> kr.start_value
+order by kr.id
+limit 1;
+
+select
+  kr.current_value =
+    kr.start_value + (0.7::numeric * (kr.target_value - kr.start_value))
+    as current_value_was_propagated,
+  round(kr.score, 3) as score
+from public.key_result as kr
+join public.objective as o on o.id = kr.objective_id
+where o.owner_id = auth.uid()
+  and kr.target_value <> kr.start_value
+order by kr.id
+limit 1;
+-- current_value_was_propagated | score
+-- true                         | 0.700
+rollback;
+```
+
+The degenerate `start_value = target_value` case must store `NULL`, never zero
+or one.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000004',
+  true
+);
+
+update public.key_result as kr
+set target_value = kr.start_value
+where kr.id = (
+  select candidate.id
+  from public.key_result as candidate
+  join public.objective as o on o.id = candidate.objective_id
+  where o.owner_id = auth.uid()
+  order by candidate.id
+  limit 1
+)
+returning kr.score is null as score_is_null;
+-- true
+rollback;
+```
+
+## Ruling 2: nested STABLE SECURITY INVOKER table function
+
+The catalog must show a set-returning (`proretset`) stable (`provolatile = 's'`)
+function that is not `SECURITY DEFINER` (`prosecdef = false`). There must be no
+view or table named `employee_review_summary`.
+
+```sql
+select
+  p.proretset,
+  p.provolatile = 's' as is_stable,
+  not p.prosecdef as is_security_invoker,
+  pg_get_function_result(p.oid) as result_shape
+from pg_proc as p
+join pg_namespace as n on n.oid = p.pronamespace
+where n.nspname = 'public'
+  and p.proname = 'employee_review_summary'
+  and pg_get_function_identity_arguments(p.oid) = 'p_review_cycle_id uuid, p_employee_id uuid';
+-- proretset | is_stable | is_security_invoker | result_shape
+-- true      | true      | true                | TABLE(summary jsonb)
+
+select to_regclass('public.employee_review_summary') is null
+  as no_flat_summary_relation;
+-- true
+```
+
+This transaction computes both KRA rows, then calls the summary as Dara. It must
+return one nested JSON object containing two arrays. Each visible key result has
+an `effective_score` derived from `coalesce(score_override, score)`.
+
+```sql
+begin;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000004',
+  true
+);
+set local role authenticated;
+select public.compute_goal_plan_rating(
+  '33333333-3333-4333-8333-00000000000a', 'self'
+);
+
+reset role;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000002',
+  true
+);
+set local role authenticated;
+select public.compute_goal_plan_rating(
+  '33333333-3333-4333-8333-00000000000a', 'manager'
+);
+
+reset role;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000004',
+  true
+);
+set local role authenticated;
+
+select
+  jsonb_typeof(summary) as summary_type,
+  jsonb_typeof(summary -> 'kra_ratings') as kra_ratings_type,
+  jsonb_array_length(summary -> 'kra_ratings') as kra_rating_count,
+  jsonb_typeof(summary -> 'objectives') as objectives_type,
+  summary -> 'objectives' as objectives
+from public.employee_review_summary(
+  '22222222-2222-4222-8222-000000000001',
+  '11111111-1111-4111-8111-000000000004'
+);
+-- summary_type | kra_ratings_type | kra_rating_count | objectives_type
+-- object       | array            | 2                | array
+rollback;
+```
+
+An unrelated caller gets no function row at all because the invoker cannot see
+the employee's goal plan through RLS.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000003',
+  true
+);
+
+select count(*)
+from public.employee_review_summary(
+  '22222222-2222-4222-8222-000000000001',
+  '11111111-1111-4111-8111-000000000004'
+);
+-- 0
+rollback;
+```
+
+## Phase 1 rollup regression guard
+
+Phase 2 must not change `compute_goal_plan_rating`. The original Dara plan must
+still compute exactly `4.220` for self and `3.580` for manager.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000004',
+  true
+);
+select public.compute_goal_plan_rating(
+  '33333333-3333-4333-8333-00000000000a', 'self'
+);
+-- 4.220
+rollback;
+
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000002',
+  true
+);
+select public.compute_goal_plan_rating(
+  '33333333-3333-4333-8333-00000000000a', 'manager'
+);
+-- 3.580
+rollback;
+```
