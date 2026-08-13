@@ -414,6 +414,83 @@ select public.compute_goal_plan_rating('33333333-3333-4333-8333-00000000000a', '
 select public.compute_goal_plan_rating('33333333-3333-4333-8333-00000000000a', 'manager');
 
 -- ===========================================================================
+-- GATE 1 FACILITATOR FIXTURE — Vuthy's unpublished manager-rated plan
+--
+-- This plan deliberately has no calibration_participant row. It is the
+-- positive eligibility fixture for calibration_eligible_plans: same cycle,
+-- manager score computed, and not yet published or assigned to a session.
+-- ===========================================================================
+
+insert into public.employee_goal_plan (
+  id, review_cycle_id, employee_id, status, overall_rating_scale_max
+)
+values (
+  '33333333-3333-4333-8333-00000000000e',
+  '22222222-2222-4222-8222-000000000001',
+  '11111111-1111-4111-8111-000000000008',
+  'manager_reviewed',
+  5
+)
+on conflict (id) do nothing;
+
+insert into public.review_participant (
+  employee_goal_plan_id, participant_id, role
+)
+values
+  (
+    '33333333-3333-4333-8333-00000000000e',
+    '11111111-1111-4111-8111-000000000008',
+    'employee'
+  ),
+  (
+    '33333333-3333-4333-8333-00000000000e',
+    '11111111-1111-4111-8111-000000000003',
+    'line_manager'
+  ),
+  (
+    '33333333-3333-4333-8333-00000000000e',
+    '11111111-1111-4111-8111-000000000001',
+    'hr_admin'
+  )
+on conflict (employee_goal_plan_id, participant_id, role) do nothing;
+
+insert into public.kra_category (
+  id, employee_goal_plan_id, name, description, weight
+)
+values (
+  '44444444-4444-4444-8444-00000000000f',
+  '33333333-3333-4333-8333-00000000000e',
+  'Customer Reliability',
+  'Keep customer-facing services dependable and recovery work disciplined.',
+  100.00
+)
+on conflict (id) do nothing;
+
+insert into public.goal (
+  id, kra_category_id, title, description, weight, target_metric,
+  rating_scale_max, self_rating, self_comment, manager_rating, manager_comment
+)
+values (
+  '55555555-5555-4555-8555-000000000009',
+  '44444444-4444-4444-8444-00000000000f',
+  'Reduce customer-impacting incidents',
+  'Improve prevention and recovery for the services Vuthy owns.',
+  100.00,
+  'No repeat P1 incidents and median recovery under 30 minutes',
+  5,
+  4.50,
+  'Prevented repeat incidents and improved the operational runbooks.',
+  4.00,
+  'Strong reliability work with clear, measurable recovery improvements.'
+)
+on conflict (id) do nothing;
+
+select public.compute_goal_plan_rating(
+  '33333333-3333-4333-8333-00000000000e',
+  'manager'
+);
+
+-- ===========================================================================
 -- PHASE 3 — calibration, publish gate
 --
 -- Everything below is appended by Phase 3 and touches nothing above it.
