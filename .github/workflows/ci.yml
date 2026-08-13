@@ -34,3 +34,34 @@ jobs:
         run: |
           psql "postgresql://postgres:postgres@127.0.0.1:15422/postgres" \
             -v ON_ERROR_STOP=1 -f scripts/verify.sql
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    env:
+      # Local-only Supabase demo credentials (same fixed JWT secret every
+      # `supabase init` project gets locally) — not a real secret, needed
+      # only because Next.js inlines NEXT_PUBLIC_* vars at build time.
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:15421
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
