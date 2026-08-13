@@ -363,4 +363,278 @@ begin
 end $$;
 rollback;
 
+-- ============================================================================
+-- Phase 3: RLS enabled on all three calibration tables
+-- ============================================================================
+do $$
+declare
+  v_missing text;
+begin
+  select string_agg(relname, ', ')
+  into v_missing
+  from pg_class
+  where relnamespace = 'public'::regnamespace
+    and relkind = 'r'
+    and relname in ('calibration_session', 'calibration_band', 'calibration_participant')
+    and not relrowsecurity;
+
+  if v_missing is not null then
+    raise exception 'RLS not enabled on: %', v_missing;
+  end if;
+
+  raise notice 'PASS: RLS enabled on all 3 Phase 3 calibration tables';
+end $$;
+
+-- ============================================================================
+-- Phase 3: calibration_participant reads are scoped to the specific plan's
+-- line manager, not blanket session membership. Ana can read Dara's row; Ben
+-- (no report in this session) reads zero; the employee reads zero.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+declare
+  v_rows int;
+begin
+  select count(*) into v_rows
+  from public.calibration_participant
+  where calibration_session_id = '44444444-4444-4444-8444-000000000001';
+
+  if v_rows <> 1 then
+    raise exception 'Expected Ana to see exactly 1 participant row (Dara''s), got %', v_rows;
+  end if;
+
+  raise notice 'PASS: line manager sees exactly their own report''s calibration_participant row';
+end $$;
+rollback;
+
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000003', true);
+do $$
+declare
+  v_rows int;
+begin
+  select count(*) into v_rows
+  from public.calibration_participant
+  where calibration_session_id = '44444444-4444-4444-8444-000000000001';
+
+  if v_rows <> 0 then
+    raise exception 'Expected Ben (no report in this session) to see 0 rows, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: a manager with no report in the session sees 0 calibration_participant rows';
+end $$;
+rollback;
+
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_rows int;
+begin
+  select count(*) into v_rows from public.calibration_participant;
+
+  if v_rows <> 0 then
+    raise exception 'Expected the employee to see 0 calibration_participant rows (including their own), got %', v_rows;
+  end if;
+
+  raise notice 'PASS: an employee sees 0 calibration_participant rows, including their own';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Phase 3: adjust_calibration_participant is rejected once the session is
+-- finalized, even for HR
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_participant_id uuid;
+begin
+  select id into v_participant_id
+  from public.calibration_participant
+  where calibration_session_id = '44444444-4444-4444-8444-000000000001'
+    and employee_goal_plan_id = '33333333-3333-4333-8333-00000000000a';
+
+  begin
+    perform public.adjust_calibration_participant(v_participant_id, 4.000, 'should be rejected');
+    raise exception 'ASSERTION FAILED: adjustment on a finalized session should have been rejected';
+  exception
+    when sqlstate '55000' then
+      raise notice 'PASS: adjust_calibration_participant rejected on a finalized session';
+  end;
+end $$;
+rollback;
+
+-- ============================================================================
+-- Phase 3: publish_employee_goal_plan is rejected while the plan's
+-- calibration session is still open
+-- ============================================================================
+begin;
+update public.calibration_session
+set status = 'open'
+where id = '44444444-4444-4444-8444-000000000001';
+update public.employee_goal_plan
+set published_at = null
+where id = '33333333-3333-4333-8333-00000000000a';
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+begin
+  begin
+    perform public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000a');
+    raise exception 'ASSERTION FAILED: publish should have been rejected while calibration is open';
+  exception
+    when sqlstate '55000' then
+      raise notice 'PASS: publish_employee_goal_plan rejected while calibration session is open';
+  end;
+end $$;
+rollback;
+
+-- ============================================================================
+-- Phase 3 Ruling 2: final_score populates only the manager KRA block; the
+-- self block is always null, before AND after publication
+-- ============================================================================
+begin;
+update public.employee_goal_plan
+set published_at = null
+where id = '33333333-3333-4333-8333-00000000000a';
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_manager_final jsonb;
+  v_self_final jsonb;
+begin
+  select rating -> 'final_score' into v_manager_final
+  from public.employee_review_summary('22222222-2222-4222-8222-000000000001', '11111111-1111-4111-8111-000000000004') as review
+  cross join lateral jsonb_array_elements(review.summary -> 'kra_ratings') as rating
+  where rating ->> 'rating_type' = 'manager';
+
+  select rating -> 'final_score' into v_self_final
+  from public.employee_review_summary('22222222-2222-4222-8222-000000000001', '11111111-1111-4111-8111-000000000004') as review
+  cross join lateral jsonb_array_elements(review.summary -> 'kra_ratings') as rating
+  where rating ->> 'rating_type' = 'self';
+
+  if v_manager_final is distinct from 'null'::jsonb then
+    raise exception 'Expected manager final_score null pre-publish, got %', v_manager_final;
+  end if;
+  if v_self_final is distinct from 'null'::jsonb then
+    raise exception 'Expected self final_score null pre-publish, got %', v_self_final;
+  end if;
+
+  raise notice 'PASS: final_score is null on both blocks before publication';
+end $$;
+rollback;
+
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_manager_final jsonb;
+  v_self_final jsonb;
+begin
+  select rating -> 'final_score' into v_manager_final
+  from public.employee_review_summary('22222222-2222-4222-8222-000000000001', '11111111-1111-4111-8111-000000000004') as review
+  cross join lateral jsonb_array_elements(review.summary -> 'kra_ratings') as rating
+  where rating ->> 'rating_type' = 'manager';
+
+  select rating -> 'final_score' into v_self_final
+  from public.employee_review_summary('22222222-2222-4222-8222-000000000001', '11111111-1111-4111-8111-000000000004') as review
+  cross join lateral jsonb_array_elements(review.summary -> 'kra_ratings') as rating
+  where rating ->> 'rating_type' = 'self';
+
+  if v_manager_final is distinct from to_jsonb(3.200::numeric) then
+    raise exception 'Expected manager final_score 3.200 post-publish, got %', v_manager_final;
+  end if;
+  if v_self_final is distinct from 'null'::jsonb then
+    raise exception 'Expected self final_score to STAY null post-publish, got %', v_self_final;
+  end if;
+
+  raise notice 'PASS: post-publish, manager final_score = calibrated 3.200, self stays null';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Phase 3 Ruling 1: comp_export_rows is explicitly HR-only, even though Ana
+-- (Dara's line manager) can otherwise see Dara's day-to-day review data
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows int;
+  v_final_score numeric;
+  v_band text;
+begin
+  select count(*) into v_rows
+  from public.comp_export_rows('22222222-2222-4222-8222-000000000001')
+  where employee_id = '11111111-1111-4111-8111-000000000004';
+
+  if v_rows <> 1 then
+    raise exception 'Expected HR to see exactly 1 comp export row for Dara, got %', v_rows;
+  end if;
+
+  select final_score, band_label into v_final_score, v_band
+  from public.comp_export_rows('22222222-2222-4222-8222-000000000001')
+  where employee_id = '11111111-1111-4111-8111-000000000004';
+
+  if v_final_score <> 3.200 or v_band <> 'Meets Expectations' then
+    raise exception 'Expected final_score 3.200 / band Meets Expectations, got % / %', v_final_score, v_band;
+  end if;
+
+  raise notice 'PASS: HR sees Dara''s comp export row with final_score 3.200 / Meets Expectations';
+end $$;
+rollback;
+
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+declare
+  v_rows int;
+begin
+  select count(*) into v_rows
+  from public.comp_export_rows('22222222-2222-4222-8222-000000000001');
+
+  if v_rows <> 0 then
+    raise exception 'Expected Ana (non-HR) to see 0 comp export rows, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: comp_export_rows returns 0 rows for a non-HR caller, even Dara''s own manager';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Phase 3: Phase 1 rollup regression guard — unchanged by calibration
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_self numeric;
+  v_manager numeric;
+begin
+  select public.compute_goal_plan_rating('33333333-3333-4333-8333-00000000000a', 'self') into v_self;
+  select public.compute_goal_plan_rating('33333333-3333-4333-8333-00000000000a', 'manager') into v_manager;
+
+  if v_self <> 4.220 then
+    raise exception 'Expected self rollup 4.220 (Phase 3 regression guard), got %', v_self;
+  end if;
+  if v_manager <> 3.580 then
+    raise exception 'Expected manager rollup 3.580 (Phase 3 regression guard), got %', v_manager;
+  end if;
+
+  raise notice 'PASS: Phase 1 rollup unchanged by Phase 3 calibration (4.220 / 3.580)';
+end $$;
+rollback;
+
 \echo 'ALL CHECKS PASSED'

@@ -2,6 +2,10 @@ export type KraRating = {
   rating_type: "self" | "manager";
   overall_score: number;
   computed_at: string;
+  // Phase 3: the post-calibration, published score. Null until HR publishes
+  // the plan; always null on the "self" block — self-assessments are never
+  // a calibration input, only the manager rating is.
+  final_score: number | null;
 };
 
 export type KeyResult = {

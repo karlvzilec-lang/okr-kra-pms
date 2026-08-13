@@ -29,6 +29,19 @@ export function KraStatCard({ rating, scaleMax }: { rating: KraRating; scaleMax:
           day: "numeric",
         })}
       </p>
+      {rating.final_score !== null && (
+        <div
+          className="mt-3 flex items-center justify-between gap-2 rounded-lg px-3 py-2"
+          style={{ backgroundColor: "var(--accent-soft, var(--muted))" }}
+        >
+          <span className="text-xs font-medium" style={{ color: "var(--accent)" }}>
+            Published calibrated score
+          </span>
+          <span className="font-data text-sm font-semibold" style={{ color: "var(--accent)" }}>
+            {rating.final_score.toFixed(3)}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

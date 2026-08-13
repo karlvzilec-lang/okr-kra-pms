@@ -10,6 +10,9 @@ This repo is schema-first: Postgres migrations + Row-Level Security policies for
 - **Cascade and align are different relationships**, not one generic parent-goal pointer — a cascade copies a manager's goal down to a report; an alignment links two independently pre-existing goals, one link up per goal, many down.
 - **Matrix management is a first-class, explicitly-scoped role** — a matrix manager can rate only the specific KRA categories they've been granted, keyed off an explicit grant row, never off the role name alone.
 - **Every RLS policy is keyed off an explicit participant/grant table** (`review_participant`, `review_participant_scope`), never off a bare role name or job title — this was a deliberate response to a documented SAP SuccessFactors permissioning quirk where a broadly-granted role surfaced UI for people it shouldn't have applied to.
+- **Calibration is a human-facilitated override, never an algorithm.** Every vendor researched (SAP, Workday, Lattice, Betterworks) explicitly avoids forced-distribution normalization — `calibration_participant` stores the pre-calibration snapshot (`original_score`, immutable) alongside the HR-adjusted value (`calibrated_score`) as the audit trail, and nothing auto-curves anyone's rating.
+- **The employee never sees a calibrated/final score until HR explicitly publishes it** (`employee_goal_plan.published_at`) — even mid-calibration, even after the manager's raw rating is already visible. Publishing itself is blocked while the plan's calibration session is still open, so a published score can never be a stale, un-finalized number.
+- **Comp export is deliberately more restricted than day-to-day review visibility.** A line manager can already see their own reports' individual reviews, but `comp_export_rows` gates on `is_hr_admin` explicitly — compensation-cycle data gets a narrower circle than performance-review data, as a deliberate governance boundary, not an oversight.
 
 ## Local development
 
@@ -27,7 +30,7 @@ Studio: `http://127.0.0.1:15423` · API: `http://127.0.0.1:15421` · DB: `postgr
 
 ### Automated verification
 
-`scripts/verify.sql` is an assertion suite (RLS coverage, the rollup regression guard, the matrix-scope join, the check-in scoring trigger, both Ruling fixes) that runs against a freshly-reset database and fails loudly on any mismatch:
+`scripts/verify.sql` is an assertion suite (RLS coverage across all 18 tables, the rollup regression guard, the matrix-scope join, the check-in scoring trigger, every Ruling fix across all three phases, the calibration finalize/publish gates, and the comp-export HR-only boundary — 25 assertions) that runs against a freshly-reset database and fails loudly on any mismatch:
 
 ```bash
 psql "postgresql://postgres:postgres@127.0.0.1:15422/postgres" -v ON_ERROR_STOP=1 -f scripts/verify.sql
@@ -46,7 +49,7 @@ cp .env.example .env.local   # fill in NEXT_PUBLIC_SUPABASE_ANON_KEY from `npx s
 npm run dev
 ```
 
-Local seed credentials: `dara.sok@example.com` / `password123` (or any other seeded user — see `supabase/seed.sql`).
+Local seed credentials: `dara.sok@example.com` / `password123` (or any other seeded user — see `supabase/seed.sql`). First login forces a password change (see Security, below); after that, the review summary shows the manager rating alongside a "Published calibrated score" card once HR has run the employee through calibration and published the result — the seed data ships with Dara already calibrated (`3.580` → `3.200`, moderated down a band) and published, so this renders on first login rather than needing manual setup.
 
 **Design system:** Data-Dense Dashboard pattern, navy/blue B2B palette (`#0F172A` ink, `#0369A1` accent — WCAG AA/AAA verified in both light and dark), Lexend (headings) + Source Sans 3 (body) + IBM Plex Mono (tabular score data), Phosphor icons. OKR key-result scores use the Viva Goals 0.0–0.4/0.5–0.6/0.7–0.9/1.0 red-amber-green-orange banding convention from the original research.
 
@@ -67,10 +70,11 @@ Local seed credentials: `dara.sok@example.com` / `password123` (or any other see
 
 - **Phase 1 (done):** KRA goal plans, categories, weighted goals, cascade/align, the Average Method rollup, RLS.
 - **Phase 2 (done):** Objective/Key-Result tree, check-ins, OKR alignment, matrix-manager role with scoped ratings, combined KRA+OKR review summary.
-- **Frontend (done):** employee review summary page (Next.js + Tailwind + Supabase Auth/SSR).
-- **Phase 3 (not started):** Calibration sessions, publish/close gate, comp-cycle export.
+- **Phase 3 (done):** Calibration sessions with configurable bands (no hardcoded box count), the publish/close gate, and an HR-only comp export surface.
+- **Frontend (done):** employee review summary page (Next.js + Tailwind + Supabase Auth/SSR), including the published calibrated score once available.
+- **Not yet built:** a calibration drag-and-drop UI (the schema and functions exist; there's no facilitator-facing screen yet — HR currently drives calibration via direct function calls, same as the seed data does).
 
-See `BRIEF.md` / `RULING.md` (Phase 1) and `BRIEF_PHASE2.md` / `RULING_PHASE2.md` (Phase 2) for the full design rationale and the specific disagreements that were resolved during build.
+See `BRIEF.md` / `RULING.md` (Phase 1), `BRIEF_PHASE2.md` / `RULING_PHASE2.md` (Phase 2), and `BRIEF_PHASE3.md` / `RULING_PHASE3.md` (Phase 3) for the full design rationale and the specific disagreements that were resolved during build — Phase 3 in particular has two real, independently-reasoned disagreements between the two builders (documented in the ruling) rather than the near-total convergence of the earlier phases.
 
 ## License
 
