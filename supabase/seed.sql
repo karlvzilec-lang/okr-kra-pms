@@ -412,3 +412,98 @@ on conflict (id) do nothing;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', false);
 select public.compute_goal_plan_rating('33333333-3333-4333-8333-00000000000a', 'self');
 select public.compute_goal_plan_rating('33333333-3333-4333-8333-00000000000a', 'manager');
+
+-- ===========================================================================
+-- PHASE 3 — calibration, publish gate
+--
+-- Everything below is appended by Phase 3 and touches nothing above it.
+--
+-- The participant row, its band assignment, the facilitator override and the
+-- published_at stamp are all produced by REAL function calls, not hardcoded
+-- inserts — same pattern as the compute_goal_plan_rating calls above. The
+-- calibration functions are SECURITY DEFINER + HR-admin-only, so the session
+-- GUC set above (HR admin, ...0001) is still in effect and carries through;
+-- it is re-set here explicitly so this block reads correctly on its own and
+-- survives any later reordering.
+-- ===========================================================================
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', false);
+
+-- ---------------------------------------------------------------------------
+-- calibration_session — one facilitated pass over the FY2026 cycle.
+-- Inserted as 'open' on purpose: the seed then exercises the real lifecycle
+-- in order — add participant, adjust, finalize, publish.
+-- ---------------------------------------------------------------------------
+
+insert into public.calibration_session (id, review_cycle_id, name, status)
+values
+  ('44444444-4444-4444-8444-000000000001',
+   '22222222-2222-4222-8222-000000000001',
+   'FY2026 Engineering Calibration',
+   'open')
+on conflict (id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- calibration_band — four bands, half-open [min_score, max_score).
+--
+-- The top band ends at 5.001, NOT 5.000, deliberately: matching is half-open,
+-- so a perfect 5.000 on this plan's overall_rating_scale_max of 5 would fall
+-- out of a band capped at exactly 5 and raise 23514. Spanning above the scale
+-- max is the fix, and it is why band count and edges are seed config rather
+-- than anything hardcoded in the schema.
+-- ---------------------------------------------------------------------------
+
+insert into public.calibration_band
+  (id, calibration_session_id, label, min_score, max_score, sort_order)
+values
+  ('55555555-5555-4555-8555-000000000001',
+   '44444444-4444-4444-8444-000000000001', 'Needs Improvement',    0.000, 2.500, 1),
+  ('55555555-5555-4555-8555-000000000002',
+   '44444444-4444-4444-8444-000000000001', 'Meets Expectations',   2.500, 3.500, 2),
+  ('55555555-5555-4555-8555-000000000003',
+   '44444444-4444-4444-8444-000000000001', 'Exceeds Expectations', 3.500, 4.500, 3),
+  ('55555555-5555-4555-8555-000000000004',
+   '44444444-4444-4444-8444-000000000001', 'Outstanding',          4.500, 5.001, 4)
+on conflict (id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- Add Dara's plan to the session via the real function.
+--
+-- Snapshots original_score from the MANAGER rating (3.580 — the self rating of
+-- 4.220 is never a calibration input), sets calibrated_score to the same value
+-- (calibration starts as "no change"), and lands band_id on
+-- 'Exceeds Expectations' since 3.580 falls in [3.500, 4.500).
+-- ---------------------------------------------------------------------------
+
+select public.add_plan_to_calibration_session(
+  '44444444-4444-4444-8444-000000000001',
+  '33333333-3333-4333-8333-00000000000a'
+);
+
+-- ---------------------------------------------------------------------------
+-- Facilitator override — a human moderating in the room, which is the entire
+-- point of a calibration pass. 3.580 -> 3.200 also crosses a band edge, so
+-- band_id is recomputed from 'Exceeds Expectations' down to
+-- 'Meets Expectations' and the frontend has a real band change to render.
+-- original_score stays 3.580; the pair of scores is the audit trail.
+-- ---------------------------------------------------------------------------
+
+select public.adjust_calibration_participant(
+         cp.id,
+         3.200,
+         'Calibration panel: strong delivery, but scope was narrower than peers rated at this level. Moderated down for cross-team consistency.'
+       )
+from public.calibration_participant as cp
+where cp.calibration_session_id = '44444444-4444-4444-8444-000000000001'
+  and cp.employee_goal_plan_id  = '33333333-3333-4333-8333-00000000000a';
+
+-- ---------------------------------------------------------------------------
+-- Finalize, then publish. The order matters and is enforced, not conventional:
+-- publish_employee_goal_plan rejects a plan whose calibration session is still
+-- 'open', and adjust_calibration_participant rejects any further change once
+-- the session is finalized.
+-- ---------------------------------------------------------------------------
+
+select public.finalize_calibration_session('44444444-4444-4444-8444-000000000001');
+
+select public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000a');
