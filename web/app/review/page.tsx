@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { ChartLineUp } from "@phosphor-icons/react/dist/ssr/ChartLineUp";
 import { Target } from "@phosphor-icons/react/dist/ssr/Target";
+import { SlidersHorizontal } from "@phosphor-icons/react/dist/ssr/SlidersHorizontal";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { LogoutButton } from "@/components/logout-button";
 import { KraStatCard, KraStatCardEmpty } from "@/components/kra-stat-card";
@@ -73,7 +75,19 @@ export default async function ReviewPage() {
             Performance Review
           </span>
         </div>
-        <LogoutButton />
+        <div className="flex items-center gap-2">
+          {profile?.is_hr_admin && (
+            <Link
+              href="/calibration"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-4 text-sm font-medium transition-colors hover:bg-[var(--muted)]"
+              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+            >
+              <SlidersHorizontal size={16} weight="bold" aria-hidden="true" />
+              Calibration
+            </Link>
+          )}
+          <LogoutButton />
+        </div>
       </header>
 
       <div className="mx-auto w-full max-w-4xl flex-1 px-4 py-10 sm:px-8">
