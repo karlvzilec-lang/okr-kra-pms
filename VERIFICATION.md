@@ -819,3 +819,415 @@ rollback;
 ```
 
 New passwords must be 10+ characters with upper/lower/digit/symbol (`supabase/config.toml`'s `[auth]` `password_requirements`), enforced by GoTrue on the actual `auth.updateUser` call — the frontend's live checklist is a UX convenience, not the real gate. Seeded demo passwords (`password123`) are exempt because `seed.sql` inserts pre-hashed rows directly, bypassing this check — that asymmetry is what makes the forced-first-login-change flow demoable at all.
+
+# Phase 3 verification
+
+Run these after migrations `0012` through `0015` and the Phase 3 seed
+additions. As in the earlier phases, run each transaction containing an
+expected error separately so that intentional rejection does not abort later
+checks.
+
+## RLS is enabled on all three calibration tables
+
+Run as the database owner. All three rows must return `rowsecurity = true`.
+
+```sql
+select relname, relrowsecurity as rowsecurity
+from pg_class
+where relnamespace = 'public'::regnamespace
+  and relname in (
+    'calibration_session', 'calibration_band', 'calibration_participant'
+  )
+order by relname;
+```
+
+## Line-manager scope is tied to the specific plan
+
+This self-contained transaction creates one open session containing Dara's
+plan (managed by Ana) and a temporary plan for Sophea (managed by Ben). Ana
+must see only Dara's participant row, while Ben must see only Sophea's, even
+though both plans are in the same session.
+
+```sql
+begin;
+
+insert into public.employee_goal_plan (
+  id, review_cycle_id, employee_id, status, overall_rating_scale_max
+)
+values (
+  'f3000000-0000-4000-8000-000000000002',
+  '22222222-2222-4222-8222-000000000001',
+  '11111111-1111-4111-8111-000000000007',
+  'manager_reviewed',
+  5
+);
+
+insert into public.review_participant (
+  employee_goal_plan_id, participant_id, role
+)
+values
+  (
+    'f3000000-0000-4000-8000-000000000002',
+    '11111111-1111-4111-8111-000000000007',
+    'employee'
+  ),
+  (
+    'f3000000-0000-4000-8000-000000000002',
+    '11111111-1111-4111-8111-000000000003',
+    'line_manager'
+  ),
+  (
+    'f3000000-0000-4000-8000-000000000002',
+    '11111111-1111-4111-8111-000000000001',
+    'hr_admin'
+  );
+
+insert into public.goal_plan_rating (
+  employee_goal_plan_id, rating_type, overall_score
+)
+values (
+  'f3000000-0000-4000-8000-000000000002', 'manager', 3.200
+);
+
+insert into public.calibration_session (
+  id, review_cycle_id, name
+)
+values (
+  'f3000000-0000-4000-8000-000000000001',
+  '22222222-2222-4222-8222-000000000001',
+  'Manager scope verification'
+);
+
+insert into public.calibration_band (
+  id, calibration_session_id, label, min_score, max_score, sort_order
+)
+values
+  (
+    'f3000000-0000-4000-8000-000000000003',
+    'f3000000-0000-4000-8000-000000000001',
+    'Lower', 0.000, 3.000, 1
+  ),
+  (
+    'f3000000-0000-4000-8000-000000000004',
+    'f3000000-0000-4000-8000-000000000001',
+    'Upper', 3.000, 5.001, 2
+  );
+
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000001',
+  true
+);
+set local role authenticated;
+
+select public.add_plan_to_calibration_session(
+  'f3000000-0000-4000-8000-000000000001',
+  '33333333-3333-4333-8333-00000000000a'
+);
+select public.add_plan_to_calibration_session(
+  'f3000000-0000-4000-8000-000000000001',
+  'f3000000-0000-4000-8000-000000000002'
+);
+
+reset role;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000002',
+  true
+);
+set local role authenticated;
+
+select employee.email
+from public.calibration_participant as cp
+join public.employee_goal_plan as egp
+  on egp.id = cp.employee_goal_plan_id
+join public.profiles as employee on employee.id = egp.employee_id
+where cp.calibration_session_id =
+  'f3000000-0000-4000-8000-000000000001';
+-- Exactly one row: dara.sok@example.com
+
+reset role;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000003',
+  true
+);
+set local role authenticated;
+
+select employee.email
+from public.calibration_participant as cp
+join public.employee_goal_plan as egp
+  on egp.id = cp.employee_goal_plan_id
+join public.profiles as employee on employee.id = egp.employee_id
+where cp.calibration_session_id =
+  'f3000000-0000-4000-8000-000000000001';
+-- Exactly one row: sophea.im@example.com
+
+rollback;
+```
+
+An employee cannot read any calibration participant rows, including their own.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000004',
+  true
+);
+
+select count(*) from public.calibration_participant;
+-- 0
+rollback;
+```
+
+## Finalization freezes adjustments
+
+The seed finalizes Dara's calibration session. A later adjustment must fail in
+the function even though the caller is HR.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000001',
+  true
+);
+
+select public.adjust_calibration_participant(
+  (
+    select cp.id
+    from public.calibration_participant as cp
+    where cp.employee_goal_plan_id =
+      '33333333-3333-4333-8333-00000000000a'
+    order by cp.created_at, cp.id
+    limit 1
+  ),
+  4.000,
+  'Must be rejected after finalization'
+);
+-- ERROR: Calibration participant ... belongs to a finalized session
+rollback;
+```
+
+## Open calibration blocks publication
+
+Temporarily reopen Dara's seeded calibration session and clear the publish
+timestamp as owner. The HR-only publish function must reject the plan while
+that session is open.
+
+```sql
+begin;
+update public.calibration_session as cs
+set status = 'open'
+where cs.id = (
+  select cp.calibration_session_id
+  from public.calibration_participant as cp
+  where cp.employee_goal_plan_id =
+    '33333333-3333-4333-8333-00000000000a'
+  order by cp.created_at, cp.id
+  limit 1
+);
+
+update public.employee_goal_plan
+set published_at = null
+where id = '33333333-3333-4333-8333-00000000000a';
+
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000001',
+  true
+);
+
+select public.publish_employee_goal_plan(
+  '33333333-3333-4333-8333-00000000000a'
+);
+-- ERROR: Employee goal plan ... cannot be published while calibration is open
+rollback;
+```
+
+## Publish gate and Ruling 2: only the manager block gets final_score
+
+Clear `published_at`, then call the summary as Dara. Both blocks contain the
+additive `final_score` key, but both values are null before publication. After
+HR republishes the plan, the manager block equals the calibrated value while
+the self block remains null.
+
+```sql
+begin;
+update public.employee_goal_plan
+set published_at = null
+where id = '33333333-3333-4333-8333-00000000000a';
+
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000004',
+  true
+);
+
+select
+  rating ->> 'rating_type' as rating_type,
+  rating -> 'final_score' as final_score
+from public.employee_review_summary(
+  '22222222-2222-4222-8222-000000000001',
+  '11111111-1111-4111-8111-000000000004'
+) as review
+cross join lateral jsonb_array_elements(
+  review.summary -> 'kra_ratings'
+) as rating
+order by rating_type;
+-- manager | null
+-- self    | null
+
+reset role;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000001',
+  true
+);
+set local role authenticated;
+select public.publish_employee_goal_plan(
+  '33333333-3333-4333-8333-00000000000a'
+);
+
+reset role;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000004',
+  true
+);
+set local role authenticated;
+
+select
+  rating ->> 'rating_type' as rating_type,
+  rating -> 'final_score' as final_score
+from public.employee_review_summary(
+  '22222222-2222-4222-8222-000000000001',
+  '11111111-1111-4111-8111-000000000004'
+) as review
+cross join lateral jsonb_array_elements(
+  review.summary -> 'kra_ratings'
+) as rating
+order by rating_type;
+-- manager | the seeded calibrated_score
+-- self    | null (always, including after publication)
+
+reset role;
+with review as (
+  select summary
+  from public.employee_review_summary(
+    '22222222-2222-4222-8222-000000000001',
+    '11111111-1111-4111-8111-000000000004'
+  )
+), ratings as (
+  select rating
+  from review
+  cross join lateral jsonb_array_elements(
+    review.summary -> 'kra_ratings'
+  ) as rating
+), expected as (
+  select cp.calibrated_score
+  from public.calibration_participant as cp
+  where cp.employee_goal_plan_id =
+    '33333333-3333-4333-8333-00000000000a'
+  order by cp.updated_at desc, cp.created_at desc, cp.id
+  limit 1
+)
+select
+  (
+    select (rating -> 'final_score') = to_jsonb(expected.calibrated_score)
+    from ratings, expected
+    where rating ->> 'rating_type' = 'manager'
+  ) as manager_final_matches_calibration,
+  (
+    select jsonb_typeof(rating -> 'final_score') = 'null'
+    from ratings
+    where rating ->> 'rating_type' = 'self'
+  ) as self_final_is_always_null;
+-- true | true
+rollback;
+```
+
+## Ruling 1: compensation export is explicitly HR-only
+
+HR gets the published Dara row. Ana is Dara's legitimate line manager and can
+read Dara's underlying day-to-day review rows, but the explicit
+`profiles.is_hr_admin` caller gate still makes the purpose-built compensation
+export return zero rows for her.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000001',
+  true
+);
+
+select
+  employee_id,
+  full_name,
+  email,
+  manager_full_name,
+  overall_rating_scale_max,
+  final_score,
+  band_label,
+  published_at
+from public.comp_export_rows(
+  '22222222-2222-4222-8222-000000000001'
+);
+-- Includes exactly the seeded published Dara result for this cycle.
+
+reset role;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000002',
+  true
+);
+set local role authenticated;
+
+select count(*)
+from public.comp_export_rows(
+  '22222222-2222-4222-8222-000000000001'
+);
+-- 0
+rollback;
+```
+
+## Phase 1 rollup regression guard
+
+Phase 3 does not modify `compute_goal_plan_rating` or any input to its Average
+Method. Dara's original plan must still compute exactly `4.220` for self and
+`3.580` for manager.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000004',
+  true
+);
+select public.compute_goal_plan_rating(
+  '33333333-3333-4333-8333-00000000000a', 'self'
+);
+-- 4.220
+rollback;
+
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000002',
+  true
+);
+select public.compute_goal_plan_rating(
+  '33333333-3333-4333-8333-00000000000a', 'manager'
+);
+-- 3.580
+rollback;
+```
