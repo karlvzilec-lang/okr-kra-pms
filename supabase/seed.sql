@@ -222,3 +222,171 @@ values
    '55555555-5555-4555-8555-000000000008',  -- Rith's own goal (child)
    '11111111-1111-4111-8111-000000000006')  -- created by Rith himself
 on conflict (id) do nothing;
+
+-- ===========================================================================
+-- PHASE 2 ADDITIONS — OKR overlay + matrix manager
+-- Everything above this line is Phase 1 seed data and is left untouched.
+-- Fixed UUIDs + ON CONFLICT DO NOTHING, same as above: safe to re-run.
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- Matrix manager — a NEW person who is nobody's line manager in this seed.
+-- Nita Sar has no manager_id relationship to Dara at all; her only access is
+-- the explicit review_participant + review_participant_scope grant below.
+-- That is exactly the case the scope join must protect.
+-- ---------------------------------------------------------------------------
+
+insert into auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at)
+values
+  ('11111111-1111-4111-8111-000000000009', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'nita.sar@example.com', crypt('password123', gen_salt('bf')), now(), now(), now())
+on conflict (id) do nothing;
+
+insert into public.profiles (id, full_name, email, manager_id, is_hr_admin)
+values
+  ('11111111-1111-4111-8111-000000000009', 'Nita Sar', 'nita.sar@example.com', null, false)
+on conflict (id) do nothing;
+
+-- Nita joins Dara's plan (plan A) as a matrix manager. Fixed id so the scope
+-- row below can reference it without a lookup.
+insert into public.review_participant (id, employee_goal_plan_id, participant_id, role)
+values
+  ('88888888-8888-4888-8888-000000000001',
+   '33333333-3333-4333-8333-00000000000a',  -- Dara's plan
+   '11111111-1111-4111-8111-000000000009',  -- Nita
+   'matrix_manager')
+on conflict (employee_goal_plan_id, participant_id, role) do nothing;
+
+-- Scope grant: ONE category only — Quality & Collaboration. Nita has no grant
+-- on Delivery & Execution (44...00a), so goals 55...001/002/003 must stay
+-- unwritable for her.
+insert into public.review_participant_scope (id, review_participant_id, scope_type, scope_id)
+values
+  ('99999999-9999-4999-8999-000000000001',
+   '88888888-8888-4888-8888-000000000001',
+   'kra_category',
+   '44444444-4444-4444-8444-00000000000b')  -- Quality & Collaboration
+on conflict (id) do nothing;
+
+-- Advisory rating on a goal INSIDE the granted category. Separate table from
+-- goal.manager_rating, which stays Ana's alone.
+--
+-- Note for verification: the RLS write path additionally requires the plan's
+-- cycle to be in 'manager_eval'; the seeded cycle is 'active', and seeding
+-- runs as the table owner (RLS-exempt). Flip the cycle status inside the test
+-- to exercise the policy rather than relying on seed state.
+insert into public.goal_matrix_rating (id, goal_id, participant_id, rating, comment)
+values
+  ('aaaaaaaa-aaaa-4aaa-8aaa-000000000001',
+   '55555555-5555-4555-8555-000000000004',  -- Raise test coverage on billing
+   '11111111-1111-4111-8111-000000000009',  -- Nita
+   4.00,
+   'Partnered with my team on billing test coverage; consistently thorough. Advisory input only.')
+on conflict (id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- Objectives — 2 objectives x 2 key results.
+--   Objective 1 (Dara)  — ON TRACK, both key results score ~0.70
+--   Objective 2 (Ana)   — BEHIND,   both key results score ~0.30
+-- Ana's is the alignment PARENT, Dara's the CHILD (see the alignment note).
+-- ---------------------------------------------------------------------------
+
+insert into public.objective (id, review_cycle_id, owner_id, title, description, status)
+values
+  ('bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+   '22222222-2222-4222-8222-000000000001',
+   '11111111-1111-4111-8111-000000000004',  -- Dara
+   'Make checkout fast and boring',
+   'Reduce latency and failure noise in checkout so it stops being a weekly topic.',
+   'active'),
+  ('bbbbbbbb-bbbb-4bbb-8bbb-000000000002',
+   '22222222-2222-4222-8222-000000000001',
+   '11111111-1111-4111-8111-000000000002',  -- Ana
+   'Payments platform v2 adopted org-wide',
+   'Team-level outcome Ana owns; Dara''s objective aligns upward to this one.',
+   'active')
+on conflict (id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- key_result — current_value is seeded explicitly and matches the LAST
+-- check-in below, so the 0009 check-in trigger re-deriving current_value is a
+-- no-op rather than a contradiction.
+--
+-- Expected scores from clamp((current - start) / nullif(target - start, 0), 0, 1):
+--   cc...001  (70 - 0)     / (100 - 0)     = 0.700
+--   cc...002  (330 - 400)  / (300 - 400)   = 0.700   (a DECREASING metric)
+--   cc...003  (6 - 0)      / (20 - 0)      = 0.300
+--   cc...004  (300 - 0)    / (1000 - 0)    = 0.300
+-- cc...002 is deliberately a downward target: it proves the formula handles
+-- target < start without a special case, since both sides go negative.
+-- ---------------------------------------------------------------------------
+
+insert into public.key_result (
+  id, objective_id, title, metric_unit, start_value, target_value, current_value, score_override
+)
+values
+  -- Objective 1 (Dara) — on track, ~0.70
+  ('cccccccc-cccc-4ccc-8ccc-000000000001',
+   'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+   'Checkout success rate on retried payments', '%',
+   0, 100, 70, null),
+
+  ('cccccccc-cccc-4ccc-8ccc-000000000002',
+   'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+   'Checkout p95 latency', 'ms',
+   400, 300, 330, null),
+
+  -- Objective 2 (Ana) — behind, ~0.30
+  ('cccccccc-cccc-4ccc-8ccc-000000000003',
+   'bbbbbbbb-bbbb-4bbb-8bbb-000000000002',
+   'Teams migrated to payments v2', 'teams',
+   0, 20, 6, null),
+
+  ('cccccccc-cccc-4ccc-8ccc-000000000004',
+   'bbbbbbbb-bbbb-4bbb-8bbb-000000000002',
+   'Transactions served by v2 per day', 'txn/day',
+   0, 1000, 300, null)
+on conflict (id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- check_in — two check-ins on ONE key result showing progression 0 -> 40 -> 70.
+-- Inserted oldest-first; the later one leaves current_value at 70, which is
+-- what cc...001 already holds, so score stays 0.700.
+-- ---------------------------------------------------------------------------
+
+insert into public.check_in (id, key_result_id, checked_in_by, new_value, note, created_at)
+values
+  ('dddddddd-dddd-4ddd-8ddd-000000000001',
+   'cccccccc-cccc-4ccc-8ccc-000000000001',
+   '11111111-1111-4111-8111-000000000004',  -- Dara, the objective owner
+   40,
+   'Retry queue shipped; early numbers look right but sample is small.',
+   now() - interval '30 days'),
+
+  ('dddddddd-dddd-4ddd-8ddd-000000000002',
+   'cccccccc-cccc-4ccc-8ccc-000000000001',
+   '11111111-1111-4111-8111-000000000004',
+   70,
+   'Backoff tuning landed. Holding steady at 70% across a full month.',
+   now() - interval '2 days')
+on conflict (id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- objective_alignment — BOTTOM-UP, created by DARA.
+--
+-- Per Ruling 3 (Phase 1) the CHILD-side write-authority holder creates the
+-- link, so Dara — who owns the child objective — is created_by, not Ana.
+-- Per Ruling 1's corrected direction, read authority on the PARENT runs
+-- UPWARD: a caller may read an objective whose owner_id equals their own
+-- manager_id. Dara's manager_id is Ana, and Ana owns the parent objective, so
+-- Dara satisfies the parent-read half. Both halves check out with Dara as the
+-- creator; under the brief's original (backwards) wording this row would have
+-- failed authorization.
+-- ---------------------------------------------------------------------------
+
+insert into public.objective_alignment (id, parent_objective_id, child_objective_id, created_by)
+values
+  ('eeeeeeee-eeee-4eee-8eee-000000000001',
+   'bbbbbbbb-bbbb-4bbb-8bbb-000000000002',  -- Ana's objective (parent)
+   'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',  -- Dara's objective (child)
+   '11111111-1111-4111-8111-000000000004')  -- created by Dara
+on conflict (id) do nothing;
