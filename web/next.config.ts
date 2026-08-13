@@ -14,6 +14,16 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  // The repo root has its own package.json (a devDependency-only shim so
+  // `npx supabase` works without a global install — see README's Local
+  // development section). Turbopack sees two lockfiles and, without this,
+  // guesses the repo root as the workspace root instead of `web/`, which
+  // breaks `next dev`'s module resolution entirely ("Could not find the
+  // Next.js package"). `next build` only warns about this; `next dev`
+  // hard-fails, so pin it explicitly.
+  turbopack: {
+    root: __dirname,
+  },
   async headers() {
     return [
       {
