@@ -637,4 +637,383 @@ begin
 end $$;
 rollback;
 
-\echo 'ALL CHECKS PASSED'
+-- ============================================================================
+-- Gate 1: facilitator read RPCs reject non-HR callers before existence lookup
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+begin
+  begin
+    perform detail
+    from public.calibration_session_detail(
+      'f1600000-0000-4000-8000-000000000001'
+    );
+    raise exception 'ASSERTION FAILED: non-HR calibration_session_detail call should have been denied';
+  exception
+    when sqlstate '42501' then
+      raise notice 'PASS: calibration_session_detail rejects non-HR before existence lookup';
+  end;
+end $$;
+rollback;
+
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+begin
+  begin
+    perform plan_id
+    from public.calibration_eligible_plans(
+      'f1600000-0000-4000-8000-000000000002'
+    );
+    raise exception 'ASSERTION FAILED: non-HR calibration_eligible_plans call should have been denied';
+  exception
+    when sqlstate '42501' then
+      raise notice 'PASS: calibration_eligible_plans rejects non-HR before existence lookup';
+  end;
+end $$;
+rollback;
+
+-- ============================================================================
+-- Gate 1: atomic session creation RPC is HR-only
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+begin
+  begin
+    perform public.create_calibration_session_with_bands(
+      'Must be denied',
+      'f1600000-0000-4000-8000-000000000003',
+      '[]'::jsonb
+    );
+    raise exception 'ASSERTION FAILED: non-HR session creation should have been denied';
+  exception
+    when sqlstate '42501' then
+      raise notice 'PASS: create_calibration_session_with_bands rejects non-HR before other validation';
+  end;
+end $$;
+rollback;
+
+-- ============================================================================
+-- Gate 1: HR session detail has the locked nested shape and seeded values
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_detail jsonb;
+  v_outer_keys text[];
+  v_session_keys text[];
+  v_band_keys text[];
+  v_participant_keys text[];
+  v_band_labels text[];
+  v_participant jsonb;
+begin
+  select detail into v_detail
+  from public.calibration_session_detail(
+    '44444444-4444-4444-8444-000000000001'
+  );
+
+  select array_agg(key order by key) into v_outer_keys
+  from jsonb_object_keys(v_detail) as keys(key);
+
+  select array_agg(key order by key) into v_session_keys
+  from jsonb_object_keys(v_detail -> 'session') as keys(key);
+
+  select array_agg(key order by key) into v_band_keys
+  from jsonb_object_keys(v_detail -> 'bands' -> 0) as keys(key);
+
+  select array_agg(key order by key) into v_participant_keys
+  from jsonb_object_keys(v_detail -> 'participants' -> 0) as keys(key);
+
+  select array_agg(item ->> 'label' order by ordinality) into v_band_labels
+  from jsonb_array_elements(v_detail -> 'bands')
+    with ordinality as bands(item, ordinality);
+
+  v_participant := v_detail -> 'participants' -> 0;
+
+  if v_outer_keys <> array['bands', 'participants', 'session']::text[] then
+    raise exception 'Unexpected calibration detail keys: %', v_outer_keys;
+  end if;
+  if v_session_keys <> array[
+    'created_at', 'id', 'name', 'review_cycle_id', 'review_cycle_name',
+    'status', 'updated_at'
+  ]::text[] then
+    raise exception 'Unexpected calibration session keys: %', v_session_keys;
+  end if;
+  if v_band_keys <> array[
+    'id', 'label', 'max_score', 'min_score', 'sort_order'
+  ]::text[] then
+    raise exception 'Unexpected calibration band keys: %', v_band_keys;
+  end if;
+  if v_participant_keys <> array[
+    'band_id', 'calibrated_score', 'employee_email', 'employee_full_name',
+    'employee_goal_plan_id', 'employee_id', 'facilitator_note', 'id',
+    'manager_full_name', 'original_score', 'overall_rating_scale_max',
+    'published_at'
+  ]::text[] then
+    raise exception 'Unexpected calibration participant keys: %', v_participant_keys;
+  end if;
+
+  if v_detail -> 'session' ->> 'id' <> '44444444-4444-4444-8444-000000000001'
+     or v_detail -> 'session' ->> 'name' <> 'FY2026 Engineering Calibration'
+     or v_detail -> 'session' ->> 'status' <> 'finalized'
+     or v_detail -> 'session' ->> 'review_cycle_id' <> '22222222-2222-4222-8222-000000000001'
+     or v_detail -> 'session' ->> 'review_cycle_name' <> 'FY2026 Annual Review'
+     or jsonb_typeof(v_detail -> 'session' -> 'created_at') is distinct from 'string'
+     or jsonb_typeof(v_detail -> 'session' -> 'updated_at') is distinct from 'string' then
+    raise exception 'Unexpected seeded calibration session payload: %', v_detail -> 'session';
+  end if;
+
+  if jsonb_array_length(v_detail -> 'bands') <> 4
+     or v_band_labels <> array[
+       'Needs Improvement', 'Meets Expectations',
+       'Exceeds Expectations', 'Outstanding'
+     ]::text[] then
+    raise exception 'Unexpected seeded calibration bands: %', v_detail -> 'bands';
+  end if;
+
+  if jsonb_array_length(v_detail -> 'participants') <> 1
+     or v_participant ->> 'employee_goal_plan_id' <> '33333333-3333-4333-8333-00000000000a'
+     or v_participant ->> 'employee_id' <> '11111111-1111-4111-8111-000000000004'
+     or v_participant ->> 'employee_full_name' <> 'Dara Sok'
+     or v_participant ->> 'employee_email' <> 'dara.sok@example.com'
+     or v_participant ->> 'manager_full_name' <> 'Ana Kim'
+     or (v_participant ->> 'original_score')::numeric <> 3.580
+     or (v_participant ->> 'calibrated_score')::numeric <> 3.200
+     or v_participant ->> 'band_id' <> '55555555-5555-4555-8555-000000000002'
+     or (v_participant ->> 'overall_rating_scale_max')::integer <> 5
+     or jsonb_typeof(v_participant -> 'published_at') is distinct from 'string' then
+    raise exception 'Unexpected seeded calibration participant: %', v_participant;
+  end if;
+
+  raise notice 'PASS: calibration_session_detail returns the locked seeded session, band, and participant shape';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Gate 1: eligible plans are same-cycle, manager-rated, unpublished, and not
+-- already in this session. Each exclusion is isolated in this transaction.
+-- ============================================================================
+begin;
+update public.employee_goal_plan
+set published_at = null
+where id = '33333333-3333-4333-8333-00000000000a';
+
+insert into public.goal_plan_rating (
+  employee_goal_plan_id, rating_type, overall_score
+)
+values (
+  '33333333-3333-4333-8333-00000000000b', 'manager', 4.500
+);
+
+update public.employee_goal_plan
+set published_at = now()
+where id = '33333333-3333-4333-8333-00000000000b';
+
+insert into public.review_cycle (id, name, start_date, end_date, status)
+values (
+  'f1600000-0000-4000-8000-000000000010',
+  'Wrong-cycle eligibility fixture',
+  '2027-01-01',
+  '2027-12-31',
+  'active'
+);
+
+insert into public.employee_goal_plan (
+  id, review_cycle_id, employee_id, status, overall_rating_scale_max
+)
+values (
+  'f1600000-0000-4000-8000-000000000011',
+  'f1600000-0000-4000-8000-000000000010',
+  '11111111-1111-4111-8111-000000000007',
+  'manager_reviewed',
+  5
+);
+
+insert into public.goal_plan_rating (
+  employee_goal_plan_id, rating_type, overall_score
+)
+values (
+  'f1600000-0000-4000-8000-000000000011', 'manager', 3.750
+);
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_plan_ids uuid[];
+  v_employee_id uuid;
+  v_employee_name text;
+  v_employee_email text;
+  v_manager_score numeric;
+begin
+  select
+    array_agg(plan_id order by plan_id),
+    (array_agg(employee_id order by plan_id))[1],
+    (array_agg(employee_full_name order by plan_id))[1],
+    (array_agg(employee_email order by plan_id))[1],
+    (array_agg(manager_score order by plan_id))[1]
+  into
+    v_plan_ids,
+    v_employee_id,
+    v_employee_name,
+    v_employee_email,
+    v_manager_score
+  from public.calibration_eligible_plans(
+    '44444444-4444-4444-8444-000000000001'
+  );
+
+  if v_plan_ids <> array['33333333-3333-4333-8333-00000000000e'::uuid]
+     or v_employee_id <> '11111111-1111-4111-8111-000000000008'::uuid
+     or v_employee_name <> 'Vuthy Long'
+     or v_employee_email <> 'vuthy.long@example.com'
+     or v_manager_score <> 4.000 then
+    raise exception
+      'Expected only Vuthy plan e at manager score 4.000, got plans %, employee % / % / %, score %',
+      v_plan_ids,
+      v_employee_id,
+      v_employee_name,
+      v_employee_email,
+      v_manager_score;
+  end if;
+
+  raise notice 'PASS: calibration_eligible_plans includes Vuthy and excludes participant, published, and wrong-cycle plans';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Gate 1 Ruling 1: a published plan cannot enter another open session
+-- ============================================================================
+begin;
+insert into public.calibration_session (id, review_cycle_id, name)
+values (
+  'f1600000-0000-4000-8000-000000000020',
+  '22222222-2222-4222-8222-000000000001',
+  'Published-plan guard fixture'
+);
+
+insert into public.calibration_band (
+  id, calibration_session_id, label, min_score, max_score, sort_order
+)
+values (
+  'f1600000-0000-4000-8000-000000000021',
+  'f1600000-0000-4000-8000-000000000020',
+  'All scores', 0.000, 5.001, 1
+);
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_message text;
+begin
+  begin
+    perform public.add_plan_to_calibration_session(
+      'f1600000-0000-4000-8000-000000000020',
+      '33333333-3333-4333-8333-00000000000a'
+    );
+    raise exception 'ASSERTION FAILED: published plan should not be recalibrated';
+  exception
+    when sqlstate '55000' then
+      get stacked diagnostics v_message = message_text;
+      if v_message not like '%cannot be recalibrated without an unpublish step%' then
+        raise exception 'Published-plan rejection message was not actionable: %', v_message;
+      end if;
+      raise notice 'PASS: add_plan_to_calibration_session rejects a published plan with 55000';
+  end;
+end $$;
+rollback;
+
+-- ============================================================================
+-- Gate 1: session and bands are created together by the atomic RPC
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_session_id uuid;
+  v_session_status public.calibration_session_status;
+  v_session_cycle_id uuid;
+  v_band_labels text[];
+begin
+  v_session_id := public.create_calibration_session_with_bands(
+    'Atomic creation success fixture',
+    '22222222-2222-4222-8222-000000000001',
+    '[
+      {"label":"Lower","min_score":0.000,"max_score":3.000,"sort_order":1},
+      {"label":"Upper","min_score":3.000,"max_score":5.001,"sort_order":2}
+    ]'::jsonb
+  );
+
+  select status, review_cycle_id
+  into v_session_status, v_session_cycle_id
+  from public.calibration_session
+  where id = v_session_id
+    and name = 'Atomic creation success fixture';
+
+  select array_agg(label order by sort_order, id)
+  into v_band_labels
+  from public.calibration_band
+  where calibration_session_id = v_session_id;
+
+  if v_session_id is null
+     or v_session_status <> 'open'::public.calibration_session_status
+     or v_session_cycle_id <> '22222222-2222-4222-8222-000000000001'::uuid
+     or v_band_labels <> array['Lower', 'Upper']::text[] then
+    raise exception
+      'Atomic creation returned unexpected session %, status %, cycle %, bands %',
+      v_session_id,
+      v_session_status,
+      v_session_cycle_id,
+      v_band_labels;
+  end if;
+
+  raise notice 'PASS: create_calibration_session_with_bands creates the open session and ordered bands together';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Gate 1: a band constraint failure rolls back the session insert too
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_orphan_count integer;
+begin
+  begin
+    perform public.create_calibration_session_with_bands(
+      'Atomic creation rollback fixture',
+      '22222222-2222-4222-8222-000000000001',
+      '[
+        {"label":"Overlapping one","min_score":0.000,"max_score":3.500,"sort_order":1},
+        {"label":"Overlapping two","min_score":3.000,"max_score":5.001,"sort_order":2}
+      ]'::jsonb
+    );
+    raise exception 'ASSERTION FAILED: overlapping bands should have been rejected';
+  exception
+    when sqlstate '23P01' then
+      null;
+  end;
+
+  select count(*) into v_orphan_count
+  from public.calibration_session
+  where name = 'Atomic creation rollback fixture';
+
+  if v_orphan_count <> 0 then
+    raise exception 'Expected no orphaned session after band failure, got %', v_orphan_count;
+  end if;
+
+  raise notice 'PASS: overlapping bands fail and roll back the entire session creation';
+end $$;
+rollback;
+
+\echo 'ALL 33 CHECKS PASSED'

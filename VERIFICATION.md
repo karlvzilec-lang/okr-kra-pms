@@ -1,5 +1,8 @@
 # Phase 1 verification
 
+The automated gate in `scripts/verify.sql` runs **33 assertions** after a fresh
+local database reset.
+
 Run these queries against a database containing migrations `0001` through `0004` and `supabase/seed.sql`. They use the seed's fixed UUIDs and simulate API users with `SET LOCAL ROLE authenticated` plus a JWT `sub` claim. Run each transaction separately so an expected error does not abort later checks.
 
 ## Seed identifiers
@@ -10,10 +13,12 @@ Run these queries against a database containing migrations `0001` through `0004`
 | Manager (Ana) | `11111111-1111-4111-8111-000000000002` |
 | Employee (Dara) | `11111111-1111-4111-8111-000000000004` |
 | Employee (Rith) | `11111111-1111-4111-8111-000000000006` |
+| Employee (Vuthy) | `11111111-1111-4111-8111-000000000008` |
 | Review cycle | `22222222-2222-4222-8222-000000000001` |
 | Dara plan | `33333333-3333-4333-8333-00000000000a` |
 | Ana plan | `33333333-3333-4333-8333-00000000000b` |
 | Rith plan | `33333333-3333-4333-8333-00000000000d` |
+| Vuthy plan | `33333333-3333-4333-8333-00000000000e` |
 | Ana parent goal | `55555555-5555-4555-8555-000000000006` |
 | Rith child goal | `55555555-5555-4555-8555-000000000008` |
 
@@ -780,6 +785,196 @@ select public.compute_goal_plan_rating(
   '33333333-3333-4333-8333-00000000000a', 'manager'
 );
 -- 3.580
+rollback;
+```
+
+# Gate 1 facilitator verification
+
+Run these after migration `0016_calibration_facilitator_views.sql` and the
+Gate 1 seed addition. The automated forms are the final eight assertions in
+`scripts/verify.sql`, bringing the suite total from 25 to **33**.
+
+## All three new RPCs are HR-only
+
+Use a non-HR caller and nonexistent identifiers. Each call must raise `42501`,
+which also proves the authorization gate runs before any existence lookup.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000002',
+  true
+);
+
+select * from public.calibration_session_detail(
+  'f1600000-0000-4000-8000-000000000001'
+);
+-- ERROR 42501: Only HR admins may view calibration session details
+rollback;
+
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000002',
+  true
+);
+
+select * from public.calibration_eligible_plans(
+  'f1600000-0000-4000-8000-000000000002'
+);
+-- ERROR 42501: Only HR admins may view calibration-eligible plans
+rollback;
+
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000002',
+  true
+);
+
+select public.create_calibration_session_with_bands(
+  'Must be denied',
+  'f1600000-0000-4000-8000-000000000003',
+  '[]'::jsonb
+);
+-- ERROR 42501: Only HR admins may create calibration sessions
+rollback;
+```
+
+## Seeded session detail has the locked shape
+
+As HR, the finalized seeded session returns one JSON object with a `session`
+object, four ordered `bands`, and one Dara participant. The participant has
+manager `Ana Kim`, original score `3.580`, calibrated score `3.200`, the
+`Meets Expectations` band id, and a non-null publish timestamp. Both array
+fields are JSON arrays, never JSON null.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000001',
+  true
+);
+
+select detail
+from public.calibration_session_detail(
+  '44444444-4444-4444-8444-000000000001'
+);
+rollback;
+```
+
+## Eligible plans are cycle-, publication-, and membership-safe
+
+The automated transaction clears Dara's publish timestamp to isolate the
+already-participating exclusion, temporarily gives published Ana a manager
+score, and creates an unpublished manager-rated plan in a different cycle.
+The RPC still returns exactly Vuthy's seeded plan:
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000001',
+  true
+);
+
+select *
+from public.calibration_eligible_plans(
+  '44444444-4444-4444-8444-000000000001'
+);
+-- 33333333-3333-4333-8333-00000000000e | Vuthy Long | 4.000
+rollback;
+```
+
+## Published plans cannot be recalibrated
+
+Create another open session for the seeded cycle, then try to add Dara's
+published plan. `add_plan_to_calibration_session` must raise `55000` with an
+actionable message explaining that an unpublish step is required.
+
+```sql
+begin;
+insert into public.calibration_session (id, review_cycle_id, name)
+values (
+  'f1600000-0000-4000-8000-000000000020',
+  '22222222-2222-4222-8222-000000000001',
+  'Published-plan guard fixture'
+);
+insert into public.calibration_band (
+  id, calibration_session_id, label, min_score, max_score, sort_order
+)
+values (
+  'f1600000-0000-4000-8000-000000000021',
+  'f1600000-0000-4000-8000-000000000020',
+  'All scores', 0.000, 5.001, 1
+);
+
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000001',
+  true
+);
+select public.add_plan_to_calibration_session(
+  'f1600000-0000-4000-8000-000000000020',
+  '33333333-3333-4333-8333-00000000000a'
+);
+-- ERROR 55000: Published employee goal plan ... cannot be recalibrated
+--              without an unpublish step
+rollback;
+```
+
+## Session and band creation is atomic
+
+A valid payload returns an open session id with both ordered bands. An
+overlapping payload raises the existing exclusion violation (`23P01`); when
+that error is caught inside the test block, no session row with the failed
+name remains, proving the session insert rolled back with its band inserts.
+
+```sql
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000001',
+  true
+);
+
+select public.create_calibration_session_with_bands(
+  'Atomic creation success fixture',
+  '22222222-2222-4222-8222-000000000001',
+  '[
+    {"label":"Lower","min_score":0,"max_score":3,"sort_order":1},
+    {"label":"Upper","min_score":3,"max_score":5.001,"sort_order":2}
+  ]'::jsonb
+);
+-- Returns the new calibration_session.id; both bands share that id.
+rollback;
+
+begin;
+set local role authenticated;
+select set_config(
+  'request.jwt.claim.sub',
+  '11111111-1111-4111-8111-000000000001',
+  true
+);
+
+select public.create_calibration_session_with_bands(
+  'Atomic creation rollback fixture',
+  '22222222-2222-4222-8222-000000000001',
+  '[
+    {"label":"One","min_score":0,"max_score":3.5,"sort_order":1},
+    {"label":"Two","min_score":3,"max_score":5.001,"sort_order":2}
+  ]'::jsonb
+);
+-- ERROR 23P01: conflicting key value violates exclusion constraint
 rollback;
 ```
 
