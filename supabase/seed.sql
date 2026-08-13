@@ -30,16 +30,23 @@
 -- auth.users (local stack only; password hashes are placeholders)
 -- ---------------------------------------------------------------------------
 
-insert into auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at)
+-- Note: confirmation_token/recovery_token/email_change*/phone_change* are
+-- explicitly '' rather than left to default NULL — GoTrue's Go client scans
+-- these as non-nullable strings and returns "converting NULL to string is
+-- unsupported" (500) on any auth call for a user row that omits them.
+insert into auth.users (
+  id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at,
+  confirmation_token, recovery_token, email_change, email_change_token_new, email_change_token_current, phone_change, phone_change_token
+)
 values
-  ('11111111-1111-4111-8111-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'hr.admin@example.com',   crypt('password123', gen_salt('bf')), now(), now(), now()),
-  ('11111111-1111-4111-8111-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'ana.manager@example.com',crypt('password123', gen_salt('bf')), now(), now(), now()),
-  ('11111111-1111-4111-8111-000000000003', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'ben.manager@example.com',crypt('password123', gen_salt('bf')), now(), now(), now()),
-  ('11111111-1111-4111-8111-000000000004', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'dara.sok@example.com',   crypt('password123', gen_salt('bf')), now(), now(), now()),
-  ('11111111-1111-4111-8111-000000000005', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'lina.chan@example.com',  crypt('password123', gen_salt('bf')), now(), now(), now()),
-  ('11111111-1111-4111-8111-000000000006', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'rith.pen@example.com',   crypt('password123', gen_salt('bf')), now(), now(), now()),
-  ('11111111-1111-4111-8111-000000000007', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'sophea.im@example.com',  crypt('password123', gen_salt('bf')), now(), now(), now()),
-  ('11111111-1111-4111-8111-000000000008', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'vuthy.long@example.com', crypt('password123', gen_salt('bf')), now(), now(), now())
+  ('11111111-1111-4111-8111-000000000001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'hr.admin@example.com',   crypt('password123', gen_salt('bf')), now(), now(), now(), '', '', '', '', '', '', ''),
+  ('11111111-1111-4111-8111-000000000002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'ana.manager@example.com',crypt('password123', gen_salt('bf')), now(), now(), now(), '', '', '', '', '', '', ''),
+  ('11111111-1111-4111-8111-000000000003', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'ben.manager@example.com',crypt('password123', gen_salt('bf')), now(), now(), now(), '', '', '', '', '', '', ''),
+  ('11111111-1111-4111-8111-000000000004', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'dara.sok@example.com',   crypt('password123', gen_salt('bf')), now(), now(), now(), '', '', '', '', '', '', ''),
+  ('11111111-1111-4111-8111-000000000005', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'lina.chan@example.com',  crypt('password123', gen_salt('bf')), now(), now(), now(), '', '', '', '', '', '', ''),
+  ('11111111-1111-4111-8111-000000000006', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'rith.pen@example.com',   crypt('password123', gen_salt('bf')), now(), now(), now(), '', '', '', '', '', '', ''),
+  ('11111111-1111-4111-8111-000000000007', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'sophea.im@example.com',  crypt('password123', gen_salt('bf')), now(), now(), now(), '', '', '', '', '', '', ''),
+  ('11111111-1111-4111-8111-000000000008', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'vuthy.long@example.com', crypt('password123', gen_salt('bf')), now(), now(), now(), '', '', '', '', '', '', '')
 on conflict (id) do nothing;
 
 -- ---------------------------------------------------------------------------
@@ -236,9 +243,12 @@ on conflict (id) do nothing;
 -- That is exactly the case the scope join must protect.
 -- ---------------------------------------------------------------------------
 
-insert into auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at)
+insert into auth.users (
+  id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at,
+  confirmation_token, recovery_token, email_change, email_change_token_new, email_change_token_current, phone_change, phone_change_token
+)
 values
-  ('11111111-1111-4111-8111-000000000009', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'nita.sar@example.com', crypt('password123', gen_salt('bf')), now(), now(), now())
+  ('11111111-1111-4111-8111-000000000009', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'nita.sar@example.com', crypt('password123', gen_salt('bf')), now(), now(), now(), '', '', '', '', '', '', '')
 on conflict (id) do nothing;
 
 insert into public.profiles (id, full_name, email, manager_id, is_hr_admin)
@@ -390,3 +400,15 @@ values
    'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',  -- Dara's objective (child)
    '11111111-1111-4111-8111-000000000004')  -- created by Dara
 on conflict (id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- Populate goal_plan_rating by calling the real compute_goal_plan_rating
+-- function rather than hardcoding scores, so the seed exercises the rollup
+-- itself and the demo UI shows real KRA numbers on first load. Run as HR
+-- admin via the same request.jwt.claim.sub GUC trick VERIFICATION.md uses.
+-- is_local=false (session-level, not transaction-local) because seed.sql
+-- runs as one autocommit session with no surrounding BEGIN/COMMIT.
+-- ---------------------------------------------------------------------------
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', false);
+select public.compute_goal_plan_rating('33333333-3333-4333-8333-00000000000a', 'self');
+select public.compute_goal_plan_rating('33333333-3333-4333-8333-00000000000a', 'manager');
