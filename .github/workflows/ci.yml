@@ -16,7 +16,10 @@ jobs:
       - name: Install Supabase CLI
         uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # Pinned rather than "latest": resolving "latest" costs an extra
+          # GitHub API call that intermittently hits anonymous rate limits
+          # and fails the whole job before anything of ours even runs.
+          version: 2.114.0
 
       - name: Start local Supabase stack
         run: supabase start
