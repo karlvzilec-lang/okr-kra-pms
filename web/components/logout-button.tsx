@@ -22,7 +22,7 @@ export function LogoutButton() {
       type="button"
       onClick={handleLogout}
       disabled={pending}
-      className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-[var(--muted)] disabled:opacity-50 cursor-pointer"
+      className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-4 text-sm font-medium transition-colors hover:bg-[var(--muted)] active:scale-[0.98] disabled:opacity-50 cursor-pointer"
       style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
     >
       <SignOut size={16} weight="bold" aria-hidden="true" />

@@ -782,3 +782,40 @@ select public.compute_goal_plan_rating(
 -- 3.580
 rollback;
 ```
+
+## Password policy (forced rotation)
+
+`profiles.password_changed_at` starts `NULL` for every seeded account, so first login redirects the frontend to `/change-password` (`web/lib/password.ts`'s `isPasswordExpired`, checked server-side in `web/app/review/page.tsx` on every load — not a client-only gate). It expires again 60 days after the last change.
+
+A user may update their own `password_changed_at`, but nothing else on their `profiles` row — the `profiles_restrict_self_updates` trigger (0011) blocks any other column change from a non-HR self-update, exactly like the `restrict_manager_goal_updates` column guard from Phase 1.
+
+```sql
+-- Self-update succeeds for password_changed_at
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+update public.profiles set password_changed_at = now()
+where id = '11111111-1111-4111-8111-000000000004';
+-- UPDATE 1
+rollback;
+
+-- Self-update is rejected for any other column
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+update public.profiles set full_name = 'Escalated Name'
+where id = '11111111-1111-4111-8111-000000000004';
+-- ERROR: You may only update your own password_changed_at timestamp
+rollback;
+
+-- A user cannot update anyone else's profile at all
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+update public.profiles set password_changed_at = now()
+where id = '11111111-1111-4111-8111-000000000004';
+-- UPDATE 0
+rollback;
+```
+
+New passwords must be 10+ characters with upper/lower/digit/symbol (`supabase/config.toml`'s `[auth]` `password_requirements`), enforced by GoTrue on the actual `auth.updateUser` call — the frontend's live checklist is a UX convenience, not the real gate. Seeded demo passwords (`password123`) are exempt because `seed.sql` inserts pre-hashed rows directly, bypassing this check — that asymmetry is what makes the forced-first-login-change flow demoable at all.

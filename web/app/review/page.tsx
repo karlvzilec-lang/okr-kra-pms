@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { LogoutButton } from "@/components/logout-button";
 import { KraStatCard, KraStatCardEmpty } from "@/components/kra-stat-card";
 import { ObjectiveCard } from "@/components/objective-card";
+import { isPasswordExpired } from "@/lib/password";
 import type { ReviewSummary } from "@/lib/types";
 
 export default async function ReviewPage() {
@@ -19,7 +20,7 @@ export default async function ReviewPage() {
   }
 
   const [{ data: profile }, { data: cycle }] = await Promise.all([
-    supabase.from("profiles").select("full_name, is_hr_admin").eq("id", user.id).single(),
+    supabase.from("profiles").select("full_name, is_hr_admin, password_changed_at").eq("id", user.id).single(),
     supabase
       .from("review_cycle")
       .select("id, name, status")
@@ -27,6 +28,12 @@ export default async function ReviewPage() {
       .limit(1)
       .maybeSingle(),
   ]);
+
+  // Forced rotation: never-changed or older than 60 days blocks access until
+  // the user sets a new password that meets the (now stronger) policy.
+  if (isPasswordExpired(profile?.password_changed_at ?? null)) {
+    redirect("/change-password");
+  }
 
   let summary: ReviewSummary | null = null;
   let summaryError: string | null = null;

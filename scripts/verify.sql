@@ -300,4 +300,67 @@ begin
 end $$;
 rollback;
 
+-- ============================================================================
+-- Password policy: a user may update their own password_changed_at
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_rows int;
+begin
+  update public.profiles set password_changed_at = now()
+  where id = '11111111-1111-4111-8111-000000000004';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 1 then
+    raise exception 'Expected 1 row updated (self password_changed_at), got %', v_rows;
+  end if;
+
+  raise notice 'PASS: user can update their own password_changed_at';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Password policy: self-update cannot touch any other column
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+begin
+  begin
+    update public.profiles set full_name = 'Escalated Name'
+    where id = '11111111-1111-4111-8111-000000000004';
+    raise exception 'ASSERTION FAILED: self-update should not be able to change full_name';
+  exception
+    when sqlstate '42501' then
+      raise notice 'PASS: self-update cannot change full_name (or any other column)';
+  end;
+end $$;
+rollback;
+
+-- ============================================================================
+-- Password policy: a user cannot update someone else's profile at all
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+declare
+  v_rows int;
+begin
+  update public.profiles set password_changed_at = now()
+  where id = '11111111-1111-4111-8111-000000000004';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 0 then
+    raise exception 'Expected 0 rows updated (cannot touch another user''s profile), got %', v_rows;
+  end if;
+
+  raise notice 'PASS: user cannot update another user''s profile';
+end $$;
+rollback;
+
 \echo 'ALL CHECKS PASSED'

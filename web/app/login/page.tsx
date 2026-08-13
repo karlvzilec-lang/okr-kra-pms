@@ -4,12 +4,15 @@ import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { ChartLineUp } from "@phosphor-icons/react/dist/csr/ChartLineUp";
 import { WarningCircle } from "@phosphor-icons/react/dist/csr/WarningCircle";
+import { Eye } from "@phosphor-icons/react/dist/csr/Eye";
+import { EyeSlash } from "@phosphor-icons/react/dist/csr/EyeSlash";
 import { createClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -72,11 +75,13 @@ export default function LoginPage() {
                 id="email"
                 name="email"
                 type="email"
+                inputMode="email"
                 autoComplete="email"
+                autoFocus
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--accent)]"
+                className="min-h-11 rounded-lg border px-3 text-base outline-none transition-colors focus:border-[var(--accent)] sm:text-sm"
                 style={{ borderColor: "var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
               />
             </div>
@@ -85,17 +90,33 @@ export default function LoginPage() {
               <label htmlFor="password" className="text-sm font-medium" style={{ color: "var(--foreground)" }}>
                 Password
               </label>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--accent)]"
-                style={{ borderColor: "var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
-              />
+              <div className="relative">
+                <input
+                  id="password"
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="current-password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="min-h-11 w-full rounded-lg border px-3 pr-11 text-base outline-none transition-colors focus:border-[var(--accent)] sm:text-sm"
+                  style={{ borderColor: "var(--border)", backgroundColor: "var(--background)", color: "var(--foreground)" }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-pressed={showPassword}
+                  className="absolute inset-y-0 right-0 flex w-11 items-center justify-center cursor-pointer"
+                  style={{ color: "var(--muted-foreground)" }}
+                >
+                  {showPassword ? (
+                    <EyeSlash size={18} weight="bold" aria-hidden="true" />
+                  ) : (
+                    <Eye size={18} weight="bold" aria-hidden="true" />
+                  )}
+                </button>
+              </div>
             </div>
 
             {error && (
@@ -112,7 +133,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={pending}
-              className="mt-1 rounded-lg px-4 py-2.5 text-sm font-semibold transition-[transform,opacity] active:scale-[0.98] disabled:opacity-60 cursor-pointer"
+              className="mt-1 min-h-11 rounded-lg px-4 text-sm font-semibold transition-[transform,opacity] active:scale-[0.98] disabled:opacity-60 cursor-pointer"
               style={{ backgroundColor: "var(--accent)", color: "var(--accent-foreground)" }}
             >
               {pending ? "Signing in..." : "Sign in"}

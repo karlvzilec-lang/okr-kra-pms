@@ -50,6 +50,19 @@ Local seed credentials: `dara.sok@example.com` / `password123` (or any other see
 
 **Design system:** Data-Dense Dashboard pattern, navy/blue B2B palette (`#0F172A` ink, `#0369A1` accent — WCAG AA/AAA verified in both light and dark), Lexend (headings) + Source Sans 3 (body) + IBM Plex Mono (tabular score data), Phosphor icons. OKR key-result scores use the Viva Goals 0.0–0.4/0.5–0.6/0.7–0.9/1.0 red-amber-green-orange banding convention from the original research.
 
+**Device-agnostic:** verified at 375px (mobile), 768px (tablet), and desktop widths, plus light/dark `prefers-color-scheme`. All interactive controls (inputs, buttons, the password-visibility toggle) hit a 44×44px minimum touch target. Mobile text inputs are 16px to avoid iOS auto-zoom on focus. Every route has a friendly `error.tsx` and `not-found.tsx` — no framework default error pages.
+
+## Security
+
+- **RLS is the primary boundary**, not the frontend — every table is covered (see `scripts/verify.sql`), and policies key off explicit participant/grant rows, never a bare role name. A logged-in user can only ever see what their `review_participant` rows entitle them to, regardless of what the UI shows or hides.
+- **Forced password rotation.** HR-provisioned accounts have no password of their own (`profiles.password_changed_at` starts `NULL`), so first login redirects to `/change-password` before anything else is reachable. Passwords expire again after 60 days (`lib/password.ts`'s `PASSWORD_ROTATION_DAYS`), enforced server-side on every load of `/review`, not just client-side.
+- **Password policy**: minimum 10 characters, upper + lower + digit + symbol, enforced both client-side (live checklist, immediate feedback) and server-side (`supabase/config.toml`'s `password_requirements` — GoTrue rejects non-compliant passwords on the actual `updateUser` call, so the client check is a UX convenience, not the real gate). Seeded demo passwords (`password123`) are exempt because they're inserted directly as pre-hashed rows, not through this API — that's what makes the forced-first-login-change flow possible to demo at all.
+- **Self-service is column-scoped, not just row-scoped.** A user can update their own `profiles` row (needed to record their own password change), but a `BEFORE UPDATE` trigger blocks them from touching anything on that row except `password_changed_at` — name, email, manager, and HR-admin flag stay HR-only, mirroring the same column-level-guard pattern used for line-manager goal ratings in Phase 1.
+- **No user enumeration**: the login error message is identical whether the email doesn't exist or the password is wrong.
+- **Security headers** (`web/next.config.ts`): `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, a restrictive `Permissions-Policy`, and HSTS. No CSP yet — deliberately deferred rather than shipping a guessed-at policy that might silently break Turbopack's dev-mode HMR; that's the clear next step before a production deploy.
+- **Auth rate limiting** is GoTrue's built-in `[auth.rate_limit]` config in `supabase/config.toml` (30 sign-in attempts / 5 min / IP by default) — not reimplemented at the app layer.
+- **Known follow-up**: `web/middleware.ts` uses Next.js's now-deprecated `middleware` convention (Next recommends renaming to `proxy.ts`). Left as-is rather than blind-applying an unverified codemod to security-critical session-refresh code — functionally correct, just not on the newest convention name.
+
 ## Status
 
 - **Phase 1 (done):** KRA goal plans, categories, weighted goals, cascade/align, the Average Method rollup, RLS.
