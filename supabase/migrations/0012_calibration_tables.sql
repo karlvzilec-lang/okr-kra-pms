@@ -18,7 +18,7 @@
 -- Idempotent: safe to re-run.
 
 -- ---------------------------------------------------------------------------
--- Enums
+-- Enums / extensions
 -- ---------------------------------------------------------------------------
 
 do $$
@@ -27,6 +27,11 @@ begin
     create type calibration_session_status as enum ('open', 'finalized');
   end if;
 end $$;
+
+-- btree_gist lets an exclusion constraint mix an equality test on a uuid with
+-- an overlap test on a range — needed for the no-overlapping-bands guarantee
+-- below. Ships with Postgres contrib and is present on the Supabase image.
+create extension if not exists btree_gist;
 
 -- ---------------------------------------------------------------------------
 -- employee_goal_plan.published_at — the publish/close gate.
@@ -109,6 +114,31 @@ create index if not exists calibration_band_session_id_idx
 -- supports the [min_score, max_score) lookup in 0014's matching helper
 create index if not exists calibration_band_session_range_idx
   on public.calibration_band (calibration_session_id, min_score, max_score);
+
+-- No two bands in the same session may overlap.
+--
+-- Without this, a config slip (say adding [3.0, 4.0) alongside [3.5, 4.5))
+-- leaves a score matching TWO bands, and the matcher's `order by sort_order
+-- limit 1` quietly picks one — the participant lands in a band that depends on
+-- row ordering rather than on the score. That is a silent misclassification of
+-- someone's rating, which is worse than the loud no-match raise the ruling
+-- already asks for. Modelled as the same half-open interval the matcher uses,
+-- so the constraint and the lookup cannot disagree.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conname = 'calibration_band_no_overlap'
+       and conrelid = 'public.calibration_band'::regclass
+  ) then
+    alter table public.calibration_band
+      add constraint calibration_band_no_overlap
+      exclude using gist (
+        calibration_session_id with =,
+        numrange(min_score, max_score, '[)') with &&
+      );
+  end if;
+end $$;
 
 drop trigger if exists calibration_band_set_updated_at on public.calibration_band;
 create trigger calibration_band_set_updated_at
@@ -196,3 +226,71 @@ drop trigger if exists calibration_participant_original_score_immutable
 create trigger calibration_participant_original_score_immutable
   before update on public.calibration_participant
   for each row execute function public.enforce_original_score_immutable();
+
+-- ---------------------------------------------------------------------------
+-- Referential coherence the FKs alone cannot express.
+--
+-- Two holes exist once band_id and employee_goal_plan_id are plain FKs:
+--
+--   1. band_id may point at a band belonging to a DIFFERENT session, so a
+--      participant can be labelled with a band that was never part of the
+--      session they were calibrated in. The FK is satisfied; the meaning is
+--      not. A composite FK on (session_id, band_id) would also work, but that
+--      needs a redundant unique key on calibration_band just to support it,
+--      so a trigger states the rule more directly.
+--   2. employee_goal_plan_id may point at a plan from a DIFFERENT review
+--      cycle than the session's. A calibration pass compares peers within one
+--      cycle; pulling in last year's plan silently corrupts that comparison
+--      and any comp export built on it.
+--
+-- Both are checked on INSERT and on UPDATE of the relevant columns, since the
+-- functions in 0014 set band_id on every adjustment.
+-- ---------------------------------------------------------------------------
+
+create or replace function public.enforce_calibration_participant_coherence()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_band_session  uuid;
+  v_plan_cycle    uuid;
+  v_session_cycle uuid;
+begin
+  select review_cycle_id into v_session_cycle
+    from public.calibration_session
+   where id = new.calibration_session_id;
+
+  select review_cycle_id into v_plan_cycle
+    from public.employee_goal_plan
+   where id = new.employee_goal_plan_id;
+
+  if v_plan_cycle is distinct from v_session_cycle then
+    raise exception
+      'plan % belongs to review cycle %, but calibration session % covers cycle %',
+      new.employee_goal_plan_id, v_plan_cycle, new.calibration_session_id, v_session_cycle
+      using errcode = '23514';
+  end if;
+
+  if new.band_id is not null then
+    select calibration_session_id into v_band_session
+      from public.calibration_band
+     where id = new.band_id;
+
+    if v_band_session is distinct from new.calibration_session_id then
+      raise exception
+        'band % belongs to calibration session %, not session %',
+        new.band_id, v_band_session, new.calibration_session_id
+        using errcode = '23514';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists calibration_participant_coherence
+  on public.calibration_participant;
+create trigger calibration_participant_coherence
+  before insert or update of calibration_session_id, employee_goal_plan_id, band_id
+  on public.calibration_participant
+  for each row execute function public.enforce_calibration_participant_coherence();
