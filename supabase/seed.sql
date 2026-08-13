@@ -473,29 +473,44 @@ on conflict (id) do nothing;
 -- 4.220 is never a calibration input), sets calibrated_score to the same value
 -- (calibration starts as "no change"), and lands band_id on
 -- 'Exceeds Expectations' since 3.580 falls in [3.500, 4.500).
+--
+-- Guarded so a re-run is a no-op rather than an error. Unlike the inserts
+-- above, these are function calls with no `on conflict` to absorb a second
+-- run: add_ would hit the unique (session, plan) constraint and adjust_/
+-- finalize_ would raise 'session is finalized' the second time through. Every
+-- other block in this file is re-runnable, so these match that contract.
 -- ---------------------------------------------------------------------------
 
-select public.add_plan_to_calibration_session(
-  '44444444-4444-4444-8444-000000000001',
-  '33333333-3333-4333-8333-00000000000a'
-);
+do $$
+begin
+  if not exists (
+    select 1 from public.calibration_participant
+     where calibration_session_id = '44444444-4444-4444-8444-000000000001'
+       and employee_goal_plan_id  = '33333333-3333-4333-8333-00000000000a'
+  ) then
+    perform public.add_plan_to_calibration_session(
+      '44444444-4444-4444-8444-000000000001',
+      '33333333-3333-4333-8333-00000000000a'
+    );
 
--- ---------------------------------------------------------------------------
--- Facilitator override — a human moderating in the room, which is the entire
--- point of a calibration pass. 3.580 -> 3.200 also crosses a band edge, so
--- band_id is recomputed from 'Exceeds Expectations' down to
--- 'Meets Expectations' and the frontend has a real band change to render.
--- original_score stays 3.580; the pair of scores is the audit trail.
--- ---------------------------------------------------------------------------
-
-select public.adjust_calibration_participant(
-         cp.id,
-         3.200,
-         'Calibration panel: strong delivery, but scope was narrower than peers rated at this level. Moderated down for cross-team consistency.'
-       )
-from public.calibration_participant as cp
-where cp.calibration_session_id = '44444444-4444-4444-8444-000000000001'
-  and cp.employee_goal_plan_id  = '33333333-3333-4333-8333-00000000000a';
+    -- Facilitator override — a human moderating in the room, which is the
+    -- entire point of a calibration pass. 3.580 -> 3.200 also crosses a band
+    -- edge, so band_id is recomputed from 'Exceeds Expectations' down to
+    -- 'Meets Expectations' and the frontend has a real band change to render.
+    -- original_score stays 3.580; the pair of scores is the audit trail.
+    --
+    -- Inside the same guard as the add: the adjust must happen while the
+    -- session is still 'open', and only on the row the add just created.
+    perform public.adjust_calibration_participant(
+      cp.id,
+      3.200,
+      'Calibration panel: strong delivery, but scope was narrower than peers rated at this level. Moderated down for cross-team consistency.'
+    )
+    from public.calibration_participant as cp
+    where cp.calibration_session_id = '44444444-4444-4444-8444-000000000001'
+      and cp.employee_goal_plan_id  = '33333333-3333-4333-8333-00000000000a';
+  end if;
+end $$;
 
 -- ---------------------------------------------------------------------------
 -- Finalize, then publish. The order matters and is enforced, not conventional:
@@ -504,6 +519,21 @@ where cp.calibration_session_id = '44444444-4444-4444-8444-000000000001'
 -- the session is finalized.
 -- ---------------------------------------------------------------------------
 
-select public.finalize_calibration_session('44444444-4444-4444-8444-000000000001');
+do $$
+begin
+  if exists (
+    select 1 from public.calibration_session
+     where id = '44444444-4444-4444-8444-000000000001'
+       and status = 'open'
+  ) then
+    perform public.finalize_calibration_session('44444444-4444-4444-8444-000000000001');
+  end if;
 
-select public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000a');
+  if exists (
+    select 1 from public.employee_goal_plan
+     where id = '33333333-3333-4333-8333-00000000000a'
+       and published_at is null
+  ) then
+    perform public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000a');
+  end if;
+end $$;
