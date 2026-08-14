@@ -16,7 +16,12 @@ import {
   LINK_IS_PERMANENT_MESSAGE,
   validateCascadeDraft,
 } from "@/lib/admin";
-import { formatHundredths, hundredthsToNumber, parseWeightToHundredths } from "@/lib/goals";
+import {
+  employeeCanEdit,
+  formatHundredths,
+  hundredthsToNumber,
+  parseWeightToHundredths,
+} from "@/lib/goals";
 import type { LinkableGoal } from "@/lib/admin-queries";
 import type { EmployeeGoalPlan } from "@/lib/types";
 
@@ -59,6 +64,13 @@ type Props = {
  * UPDATE/DELETE are HR-only. An already-linked goal therefore renders as
  * read-only state, and the copy says plainly that HR is the only route to
  * change it, rather than letting someone find that out through a failed save.
+ *
+ * Creating either link also requires the plan to still be employee-editable.
+ * can_edit_goal_plan_as_employee is false once a plan reaches manager_reviewed
+ * or finalized, so on those plans BOTH inserts are refused with 42501 --
+ * verified against the real policies, not assumed. Existing links stay visible
+ * (they are history, and history does not stop being true when a plan closes),
+ * but the controls that could only fail are not rendered.
  */
 export function GoalLinkForm({
   plan,
@@ -94,6 +106,10 @@ export function GoalLinkForm({
       ),
     [goals, cascadeSourceByGoalId, alignmentParentByGoalId],
   );
+
+  // A reviewed or finalized plan is frozen for the employee at the database
+  // level, so no new link can be created on it.
+  const canLink = employeeCanEdit(plan.status);
 
   const [mode, setMode] = useState<"cascade" | "align" | null>(null);
   const [sourceGoalId, setSourceGoalId] = useState("");
@@ -270,7 +286,16 @@ export function GoalLinkForm({
         </ul>
       )}
 
-      {sources.length === 0 ? (
+      {!canLink ? (
+        <p
+          className="rounded-2xl border border-dashed p-6 text-sm"
+          style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
+        >
+          {linkedGoals.length > 0
+            ? "This plan is no longer editable, so no further links can be added."
+            : "This plan is no longer editable, so cascading and alignment are closed. Links can only be recorded while the plan is still a draft or awaiting review."}
+        </p>
+      ) : sources.length === 0 ? (
         <p
           className="rounded-2xl border border-dashed p-6 text-sm"
           style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
