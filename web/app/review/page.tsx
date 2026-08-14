@@ -5,6 +5,7 @@ import { SlidersHorizontal } from "@phosphor-icons/react/dist/ssr/SlidersHorizon
 import { Crosshair } from "@phosphor-icons/react/dist/ssr/Crosshair";
 import { CalendarBlank } from "@phosphor-icons/react/dist/ssr/CalendarBlank";
 import { UsersThree } from "@phosphor-icons/react/dist/ssr/UsersThree";
+import { Gear } from "@phosphor-icons/react/dist/ssr/Gear";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { LogoutButton } from "@/components/logout-button";
@@ -135,6 +136,16 @@ export default async function ReviewPage() {
             >
               <CalendarBlank size={16} weight="bold" aria-hidden="true" />
               Manage review cycles
+            </Link>
+          )}
+          {profile?.is_hr_admin && (
+            <Link
+              href="/admin"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-4 text-sm font-medium transition-colors hover:bg-[var(--muted)]"
+              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+            >
+              <Gear size={16} weight="bold" aria-hidden="true" />
+              Admin
             </Link>
           )}
           <LogoutButton />

@@ -8,10 +8,12 @@ import { LogoutButton } from "@/components/logout-button";
 import { CycleStatusPill } from "@/components/cycles/cycle-status-pill";
 import { KeyResultEditor } from "@/components/okr/key-result-editor";
 import { CheckInForm } from "@/components/okr/check-in-form";
+import { ObjectiveAlignmentForm } from "@/components/okr/objective-alignment-form";
 import { ProgressBar } from "@/components/progress-bar";
 import { ScoreBadge, ScoreValue } from "@/components/score-badge";
 import { isPasswordExpired } from "@/lib/password";
 import { loadCheckInsForKeyResults, loadObjectiveDetail } from "@/lib/okr-queries";
+import { loadObjectiveAlignment, loadObjectiveAlignmentParents } from "@/lib/admin-queries";
 import { okrBlockedReason, okrIsWritable } from "@/lib/okr";
 
 export default async function ObjectiveDetailPage({
@@ -61,6 +63,19 @@ export default async function ObjectiveDetailPage({
     objective.key_results.map((kr) => kr.id),
   );
   const keyResultTitle = new Map(objective.key_results.map((kr) => [kr.id, kr.title]));
+
+  // Alignment is a record of how this objective ladders up, not a live edit to
+  // the objective itself, so it stays readable even in a closed cycle — the
+  // form below renders an existing link read-only regardless.
+  const [alignmentParents, existingAlignment] = await Promise.all([
+    loadObjectiveAlignmentParents(
+      supabase,
+      objective.review_cycle_id,
+      objective.owner_id,
+      objective.id,
+    ),
+    loadObjectiveAlignment(supabase, objective.id),
+  ]);
 
   return (
     <main className="flex flex-1 flex-col" style={{ backgroundColor: "var(--background)" }}>
@@ -195,6 +210,20 @@ export default async function ObjectiveDetailPage({
             </div>
           </section>
         )}
+
+        <section className="mb-10">
+          <h2
+            className="font-heading mb-3 text-sm font-semibold uppercase tracking-wide"
+            style={{ color: "var(--muted-foreground)" }}
+          >
+            Alignment
+          </h2>
+          <ObjectiveAlignmentForm
+            objectiveId={objective.id}
+            parents={alignmentParents}
+            existing={existingAlignment}
+          />
+        </section>
 
         <section>
           <div className="mb-3 flex items-center gap-2">
