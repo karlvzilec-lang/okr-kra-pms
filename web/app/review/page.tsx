@@ -2,12 +2,15 @@ import { redirect } from "next/navigation";
 import { ChartLineUp } from "@phosphor-icons/react/dist/ssr/ChartLineUp";
 import { Target } from "@phosphor-icons/react/dist/ssr/Target";
 import { SlidersHorizontal } from "@phosphor-icons/react/dist/ssr/SlidersHorizontal";
+import { UsersThree } from "@phosphor-icons/react/dist/ssr/UsersThree";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { LogoutButton } from "@/components/logout-button";
 import { KraStatCard, KraStatCardEmpty } from "@/components/kra-stat-card";
 import { ObjectiveCard } from "@/components/objective-card";
 import { isPasswordExpired } from "@/lib/password";
+import { hasAnyDirectReports, loadOwnPlanForCycle } from "@/lib/goal-plan-queries";
+import { employeeCanEdit } from "@/lib/goals";
 import type { ReviewSummary } from "@/lib/types";
 
 export default async function ReviewPage() {
@@ -36,6 +39,14 @@ export default async function ReviewPage() {
   if (isPasswordExpired(profile?.password_changed_at ?? null)) {
     redirect("/change-password");
   }
+
+  // Nav affordances, same conditional-link shape as the HR/calibration link:
+  // shown only when the row that authorizes them actually exists.
+  const [ownPlan, managesSomeone] = await Promise.all([
+    cycle ? loadOwnPlanForCycle(supabase, cycle.id, user.id) : Promise.resolve(null),
+    hasAnyDirectReports(supabase, user.id),
+  ]);
+  const canEditOwnPlan = ownPlan ? employeeCanEdit(ownPlan.status) : false;
 
   let summary: ReviewSummary | null = null;
   let summaryError: string | null = null;
@@ -76,6 +87,26 @@ export default async function ReviewPage() {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {canEditOwnPlan && ownPlan && (
+            <Link
+              href={`/goals/${ownPlan.id}`}
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-4 text-sm font-medium transition-colors hover:bg-[var(--muted)]"
+              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+            >
+              <Target size={16} weight="bold" aria-hidden="true" />
+              Edit my goals
+            </Link>
+          )}
+          {managesSomeone && (
+            <Link
+              href="/reports"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-4 text-sm font-medium transition-colors hover:bg-[var(--muted)]"
+              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+            >
+              <UsersThree size={16} weight="bold" aria-hidden="true" />
+              My reports
+            </Link>
+          )}
           {profile?.is_hr_admin && (
             <Link
               href="/calibration"
