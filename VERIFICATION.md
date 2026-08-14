@@ -1,9 +1,9 @@
 # Phase 1 verification
 
-The automated gate in `scripts/verify.sql` runs **33 assertions** after a fresh
+The automated gate in `scripts/verify.sql` runs **46 assertions** after a fresh
 local database reset.
 
-Run these queries against a database containing migrations `0001` through `0004` and `supabase/seed.sql`. They use the seed's fixed UUIDs and simulate API users with `SET LOCAL ROLE authenticated` plus a JWT `sub` claim. Run each transaction separately so an expected error does not abort later checks.
+Run these queries against a database containing migrations `0001` through `0017` and `supabase/seed.sql`. They use the seed's fixed UUIDs and simulate API users with `SET LOCAL ROLE authenticated` plus a JWT `sub` claim. Run each transaction separately so an expected error does not abort later checks.
 
 ## Seed identifiers
 
@@ -17,6 +17,7 @@ Run these queries against a database containing migrations `0001` through `0004`
 | Review cycle | `22222222-2222-4222-8222-000000000001` |
 | Dara plan | `33333333-3333-4333-8333-00000000000a` |
 | Ana plan | `33333333-3333-4333-8333-00000000000b` |
+| Lina cascaded plan | `33333333-3333-4333-8333-00000000000c` |
 | Rith plan | `33333333-3333-4333-8333-00000000000d` |
 | Vuthy plan | `33333333-3333-4333-8333-00000000000e` |
 | Ana parent goal | `55555555-5555-4555-8555-000000000006` |
@@ -788,11 +789,85 @@ select public.compute_goal_plan_rating(
 rollback;
 ```
 
+# Goal/rating creation workflow Gate 1 verification
+
+Run these after `0017_goal_rating_workflow.sql`. The automated versions are
+assertions 34 through 46 in `scripts/verify.sql`, bringing the full suite to
+**46 assertions**.
+
+The fixtures deliberately distinguish the two previously confused plans:
+Lina's `...000c` plan contains the top-down cascaded copy, while Rith's
+`...000d` plan contains his independently authored goal that was later aligned
+upward.
+
+## Employee write scope
+
+The suite verifies all of the following as authenticated employees:
+
+- Lina can insert a category and an unrated goal on her own draft plan.
+- Rith can update `self_rating` and `self_comment` on his own draft goal.
+- Rith's direct UPDATE of `manager_rating`/`manager_comment` raises `42501`.
+- Rith cannot bypass the UPDATE trigger by inserting a new goal with manager
+  fields already populated; the INSERT policy raises `42501`.
+- Once an owner-created manager rating exists, Rith cannot change the goal's
+  `rating_scale_max`; the trigger raises `42501`.
+- A permitted draft-to-submitted status call cannot also change
+  `review_cycle_id`; the plan column-scope trigger raises `42501`.
+
+The employee goal trigger protects `id`, `kra_category_id`,
+`manager_rating`, `manager_comment`, and `created_at`. The employee plan
+trigger protects `id`, `review_cycle_id`, `employee_id`,
+`overall_rating_scale_max`, `created_at`, and `published_at`. Both exempt HR
+first and use `is distinct from` comparisons. `updated_at` is intentionally
+excluded because the existing maintenance trigger owns it.
+
+## Manager rating and review scope
+
+During `manager_eval`, Ana can write manager assessment fields only when the
+specific plan is `submitted`. An attempted rating on Rith's still-draft plan
+affects zero rows through RLS, even though the cycle-wide manager window is
+open.
+
+For plan review, the suite proves:
+
+- `submitted -> manager_reviewed` succeeds for that plan's `line_manager`
+  participant, with `id`, `review_cycle_id`, `employee_id`,
+  `overall_rating_scale_max`, `created_at`, and `published_at` unchanged.
+- `submitted -> finalized` raises `42501`.
+- The same review attempt outside `manager_eval` affects zero rows. This is an
+  RLS-silent rejection, so callers must test returned-row presence rather than
+  wait for an exception.
+
+## Deferred weights and mixed-scale round trip
+
+A separate assertion changes Rith's category total to 90 and confirms
+`validate_goal_plan_weights` raises `23514`.
+
+The final assertion creates a fresh plan inside one rollback-isolated
+transaction. It builds valid 40/60 categories and three goals with mixed
+5-point and 10-point rating scales, then executes the workflow in the required
+order:
+
+1. Employee writes every self rating, computes the self rollup, then submits.
+2. Manager writes every manager rating, computes the manager rollup, then marks
+   the plan reviewed.
+
+The hand-computed normalized category scores are:
+
+- Self: delivery `(4/5 * 50% + 6/10 * 50%) = 0.70`; quality `5/5 = 1.00`.
+  Overall: `(0.70 * 40% + 1.00 * 60%) * 5 = 4.400`.
+- Manager: delivery `(3/5 * 50% + 8/10 * 50%) = 0.70`; quality `4/5 = 0.80`.
+  Overall: `(0.70 * 40% + 0.80 * 60%) * 5 = 3.800`.
+
+The assertion requires both stored rollups to match exactly and the final plan
+status to be `manager_reviewed`.
+
 # Gate 1 facilitator verification
 
 Run these after migration `0016_calibration_facilitator_views.sql` and the
-Gate 1 seed addition. The automated forms are the final eight assertions in
-`scripts/verify.sql`, bringing the suite total from 25 to **33**.
+Gate 1 seed addition. These are assertions 26 through 33 in
+`scripts/verify.sql`; the later goal/rating workflow gate adds 13 more, so the
+current suite total is **46**.
 
 ## All three new RPCs are HR-only
 

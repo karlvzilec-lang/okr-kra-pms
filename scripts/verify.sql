@@ -1016,4 +1016,673 @@ begin
 end $$;
 rollback;
 
-\echo 'ALL 33 CHECKS PASSED'
+-- ============================================================================
+-- Goal/rating Gate 1: an employee can extend their own draft plan with a
+-- category and an unrated goal. Lina's ...000c plan is the cascaded fixture.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000005', true);
+
+insert into public.kra_category (
+  id, employee_goal_plan_id, name, description, weight
+)
+values (
+  'f1700000-0000-4000-8000-000000000001',
+  '33333333-3333-4333-8333-00000000000c',
+  'Draft-plan extension',
+  'Employee-authored category verification fixture.',
+  25.00
+);
+
+insert into public.goal (
+  id, kra_category_id, title, description, weight, target_metric,
+  rating_scale_max
+)
+values (
+  'f1700000-0000-4000-8000-000000000002',
+  'f1700000-0000-4000-8000-000000000001',
+  'Employee-authored goal',
+  'Must be insertable without manager-side values.',
+  100.00,
+  'One verified draft goal',
+  5
+);
+
+do $$
+declare
+  v_category_count integer;
+  v_goal_count integer;
+begin
+  select count(*) into v_category_count
+  from public.kra_category
+  where id = 'f1700000-0000-4000-8000-000000000001';
+
+  select count(*) into v_goal_count
+  from public.goal
+  where id = 'f1700000-0000-4000-8000-000000000002'
+    and manager_rating is null
+    and manager_comment is null;
+
+  if v_category_count <> 1 or v_goal_count <> 1 then
+    raise exception
+      'Expected employee category and unrated goal inserts, got category count %, goal count %',
+      v_category_count,
+      v_goal_count;
+  end if;
+
+  raise notice 'PASS: employee inserts a category and unrated goal on Lina''s own draft cascaded plan';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: an employee may write only their self-assessment fields.
+-- Rith's ...000d plan is the independently-authored upward-alignment fixture.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+declare
+  v_rows integer;
+  v_rating numeric;
+  v_comment text;
+begin
+  update public.goal
+  set self_rating = 4.50,
+      self_comment = 'Self-assessment verification fixture.'
+  where id = '55555555-5555-4555-8555-000000000008';
+  get diagnostics v_rows = row_count;
+
+  select self_rating, self_comment
+  into v_rating, v_comment
+  from public.goal
+  where id = '55555555-5555-4555-8555-000000000008';
+
+  if v_rows <> 1
+     or v_rating <> 4.50
+     or v_comment <> 'Self-assessment verification fixture.' then
+    raise exception
+      'Expected one self-assessment update, got rows %, rating %, comment %',
+      v_rows,
+      v_rating,
+      v_comment;
+  end if;
+
+  raise notice 'PASS: employee writes self_rating and self_comment on Rith''s own draft aligned plan';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: employee UPDATE cannot write manager-only fields.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    update public.goal
+    set manager_rating = 4.00,
+        manager_comment = 'Employee must not be able to write this.'
+    where id = '55555555-5555-4555-8555-000000000008';
+    raise exception 'ASSERTION FAILED: employee manager-field UPDATE should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: employee direct UPDATE of manager_rating and manager_comment is rejected with 42501';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: employee INSERT cannot pre-populate manager fields.
+-- This is the INSERT-side bypass regression guard.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    insert into public.goal (
+      id, kra_category_id, title, weight, rating_scale_max,
+      manager_rating, manager_comment
+    )
+    values (
+      'f1700000-0000-4000-8000-000000000003',
+      '44444444-4444-4444-8444-00000000000e',
+      'Pre-rated insert bypass attempt',
+      0.00,
+      5,
+      4.00,
+      'Employee must not be able to seed this.'
+    );
+    raise exception 'ASSERTION FAILED: employee pre-rated goal INSERT should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: employee INSERT with manager_rating pre-populated is rejected with 42501';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: rating_scale_max freezes once a manager rating exists.
+-- ============================================================================
+begin;
+update public.goal
+set manager_rating = 4.00,
+    manager_comment = 'Owner-created prerequisite for scale-lock verification.'
+where id = '55555555-5555-4555-8555-000000000008';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    update public.goal
+    set rating_scale_max = 10
+    where id = '55555555-5555-4555-8555-000000000008';
+    raise exception 'ASSERTION FAILED: employee scale change after manager rating should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: employee cannot change rating_scale_max after a manager rating exists';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: an employee cannot smuggle review_cycle_id through a
+-- permitted draft-to-submitted status update.
+-- ============================================================================
+begin;
+insert into public.review_cycle (id, name, start_date, end_date, status)
+values (
+  'f1700000-0000-4000-8000-000000000010',
+  'Employee plan-column guard fixture',
+  '2027-01-01',
+  '2027-12-31',
+  'self_eval'
+);
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    update public.employee_goal_plan
+    set status = 'submitted',
+        review_cycle_id = 'f1700000-0000-4000-8000-000000000010'
+    where id = '33333333-3333-4333-8333-00000000000d';
+    raise exception 'ASSERTION FAILED: employee review_cycle_id change should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: employee cannot change review_cycle_id through a status-update call';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: a line manager can rate a submitted plan during the
+-- manager_eval window.
+-- ============================================================================
+begin;
+update public.review_cycle
+set status = 'manager_eval'
+where id = '22222222-2222-4222-8222-000000000001';
+
+update public.employee_goal_plan
+set status = 'submitted'
+where id = '33333333-3333-4333-8333-00000000000c';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+declare
+  v_rows integer;
+  v_rating numeric;
+  v_comment text;
+begin
+  update public.goal
+  set manager_rating = 4.25,
+      manager_comment = 'Manager positive-path verification fixture.'
+  where id = '55555555-5555-4555-8555-000000000007';
+  get diagnostics v_rows = row_count;
+
+  select manager_rating, manager_comment
+  into v_rating, v_comment
+  from public.goal
+  where id = '55555555-5555-4555-8555-000000000007';
+
+  if v_rows <> 1
+     or v_rating <> 4.25
+     or v_comment <> 'Manager positive-path verification fixture.' then
+    raise exception
+      'Expected one manager-rating update, got rows %, rating %, comment %',
+      v_rows,
+      v_rating,
+      v_comment;
+  end if;
+
+  raise notice 'PASS: line manager writes manager_rating and manager_comment on a submitted plan during manager_eval';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: manager-rate access is plan-status scoped. Rith's draft
+-- aligned plan stays unrated even while the cycle-wide manager window is open.
+-- ============================================================================
+begin;
+update public.review_cycle
+set status = 'manager_eval'
+where id = '22222222-2222-4222-8222-000000000001';
+
+update public.employee_goal_plan
+set status = 'draft'
+where id = '33333333-3333-4333-8333-00000000000d';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+declare
+  v_rows integer;
+begin
+  update public.goal
+  set manager_rating = 4.00,
+      manager_comment = 'Draft-plan rating must be invisible to the policy.'
+  where id = '55555555-5555-4555-8555-000000000008';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 0 then
+    raise exception 'Expected zero manager updates on a draft plan, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: line manager cannot rate Rith''s draft plan even during manager_eval';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: submitted -> manager_reviewed succeeds in manager_eval,
+-- and every protected plan column remains unchanged.
+-- ============================================================================
+begin;
+update public.review_cycle
+set status = 'manager_eval'
+where id = '22222222-2222-4222-8222-000000000001';
+
+update public.employee_goal_plan
+set status = 'submitted'
+where id = '33333333-3333-4333-8333-00000000000c';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+declare
+  v_old_id uuid;
+  v_old_review_cycle_id uuid;
+  v_old_employee_id uuid;
+  v_old_scale integer;
+  v_old_created_at timestamptz;
+  v_old_published_at timestamptz;
+  v_new_status public.goal_plan_status;
+  v_new_id uuid;
+  v_new_review_cycle_id uuid;
+  v_new_employee_id uuid;
+  v_new_scale integer;
+  v_new_created_at timestamptz;
+  v_new_published_at timestamptz;
+  v_rows integer;
+begin
+  select id, review_cycle_id, employee_id, overall_rating_scale_max,
+         created_at, published_at
+  into v_old_id, v_old_review_cycle_id, v_old_employee_id, v_old_scale,
+       v_old_created_at, v_old_published_at
+  from public.employee_goal_plan
+  where id = '33333333-3333-4333-8333-00000000000c';
+
+  update public.employee_goal_plan
+  set status = 'manager_reviewed'
+  where id = '33333333-3333-4333-8333-00000000000c';
+  get diagnostics v_rows = row_count;
+
+  select status, id, review_cycle_id, employee_id, overall_rating_scale_max,
+         created_at, published_at
+  into v_new_status, v_new_id, v_new_review_cycle_id, v_new_employee_id,
+       v_new_scale, v_new_created_at, v_new_published_at
+  from public.employee_goal_plan
+  where id = '33333333-3333-4333-8333-00000000000c';
+
+  if v_rows <> 1
+     or v_new_status <> 'manager_reviewed'::public.goal_plan_status
+     or v_new_id is distinct from v_old_id
+     or v_new_review_cycle_id is distinct from v_old_review_cycle_id
+     or v_new_employee_id is distinct from v_old_employee_id
+     or v_new_scale is distinct from v_old_scale
+     or v_new_created_at is distinct from v_old_created_at
+     or v_new_published_at is distinct from v_old_published_at then
+    raise exception
+      'Unexpected manager transition result: rows %, status %, id %, cycle %, employee %, scale %, created %, published %',
+      v_rows,
+      v_new_status,
+      v_new_id,
+      v_new_review_cycle_id,
+      v_new_employee_id,
+      v_new_scale,
+      v_new_created_at,
+      v_new_published_at;
+  end if;
+
+  raise notice 'PASS: manager transitions submitted to manager_reviewed without changing protected plan columns';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: the manager transition cannot skip directly to finalized.
+-- ============================================================================
+begin;
+update public.review_cycle
+set status = 'manager_eval'
+where id = '22222222-2222-4222-8222-000000000001';
+
+update public.employee_goal_plan
+set status = 'submitted'
+where id = '33333333-3333-4333-8333-00000000000c';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+begin
+  begin
+    update public.employee_goal_plan
+    set status = 'finalized'
+    where id = '33333333-3333-4333-8333-00000000000c';
+    raise exception 'ASSERTION FAILED: manager submitted-to-finalized transition should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: manager cannot transition a plan directly from submitted to finalized';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: an out-of-window manager transition is an RLS-silent
+-- no-op, so the assertion is row-count zero rather than an expected exception.
+-- ============================================================================
+begin;
+update public.review_cycle
+set status = 'active'
+where id = '22222222-2222-4222-8222-000000000001';
+
+update public.employee_goal_plan
+set status = 'submitted'
+where id = '33333333-3333-4333-8333-00000000000c';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+declare
+  v_rows integer;
+begin
+  update public.employee_goal_plan
+  set status = 'manager_reviewed'
+  where id = '33333333-3333-4333-8333-00000000000c';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 0 then
+    raise exception 'Expected zero out-of-window manager transitions, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: manager transition outside manager_eval affects zero rows';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: deferred plan validation rejects a non-100 category sum.
+-- ============================================================================
+begin;
+update public.kra_category
+set weight = 90.00
+where id = '44444444-4444-4444-8444-00000000000e';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    perform public.validate_goal_plan_weights('33333333-3333-4333-8333-00000000000d');
+    raise exception 'ASSERTION FAILED: non-100 plan weights should have been rejected';
+  exception
+    when sqlstate '23514' then
+      null;
+  end;
+
+  raise notice 'PASS: validate_goal_plan_weights rejects a non-100 category total with 23514';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Goal/rating Gate 1: full isolated employee-to-manager round trip. The goals
+-- intentionally mix 5-point and 10-point scales, so 4.400 and 3.800 prove
+-- per-goal normalization rather than a hidden all-out-of-five assumption.
+-- ============================================================================
+begin;
+insert into public.review_cycle (id, name, start_date, end_date, status)
+values (
+  'f1700000-0000-4000-8000-000000000100',
+  'Full goal-rating round-trip fixture',
+  '2028-01-01',
+  '2028-12-31',
+  'self_eval'
+);
+
+insert into public.employee_goal_plan (
+  id, review_cycle_id, employee_id, status, overall_rating_scale_max
+)
+values (
+  'f1700000-0000-4000-8000-000000000101',
+  'f1700000-0000-4000-8000-000000000100',
+  '11111111-1111-4111-8111-000000000006',
+  'draft',
+  5
+);
+
+insert into public.review_participant (
+  employee_goal_plan_id, participant_id, role
+)
+values
+  (
+    'f1700000-0000-4000-8000-000000000101',
+    '11111111-1111-4111-8111-000000000006',
+    'employee'
+  ),
+  (
+    'f1700000-0000-4000-8000-000000000101',
+    '11111111-1111-4111-8111-000000000002',
+    'line_manager'
+  ),
+  (
+    'f1700000-0000-4000-8000-000000000101',
+    '11111111-1111-4111-8111-000000000001',
+    'hr_admin'
+  );
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+
+insert into public.kra_category (
+  id, employee_goal_plan_id, name, weight
+)
+values
+  (
+    'f1700000-0000-4000-8000-000000000102',
+    'f1700000-0000-4000-8000-000000000101',
+    'Mixed-scale delivery',
+    40.00
+  ),
+  (
+    'f1700000-0000-4000-8000-000000000103',
+    'f1700000-0000-4000-8000-000000000101',
+    'Mixed-scale quality',
+    60.00
+  );
+
+insert into public.goal (
+  id, kra_category_id, title, weight, rating_scale_max
+)
+values
+  (
+    'f1700000-0000-4000-8000-000000000104',
+    'f1700000-0000-4000-8000-000000000102',
+    'Five-point delivery goal',
+    50.00,
+    5
+  ),
+  (
+    'f1700000-0000-4000-8000-000000000105',
+    'f1700000-0000-4000-8000-000000000102',
+    'Ten-point delivery goal',
+    50.00,
+    10
+  ),
+  (
+    'f1700000-0000-4000-8000-000000000106',
+    'f1700000-0000-4000-8000-000000000103',
+    'Five-point quality goal',
+    100.00,
+    5
+  );
+
+do $$
+declare
+  v_rows integer;
+  v_self numeric;
+begin
+  update public.goal
+  set self_rating = case id
+        when 'f1700000-0000-4000-8000-000000000104'::uuid then 4.00
+        when 'f1700000-0000-4000-8000-000000000105'::uuid then 6.00
+        when 'f1700000-0000-4000-8000-000000000106'::uuid then 5.00
+      end,
+      self_comment = 'Completed before employee submission.'
+  where id in (
+    'f1700000-0000-4000-8000-000000000104',
+    'f1700000-0000-4000-8000-000000000105',
+    'f1700000-0000-4000-8000-000000000106'
+  );
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 3 then
+    raise exception 'Expected three employee self-rating updates, got %', v_rows;
+  end if;
+
+  select public.compute_goal_plan_rating(
+    'f1700000-0000-4000-8000-000000000101',
+    'self'
+  ) into v_self;
+
+  if v_self <> 4.400 then
+    raise exception 'Expected hand-computed mixed-scale self rollup 4.400, got %', v_self;
+  end if;
+
+  update public.employee_goal_plan
+  set status = 'submitted'
+  where id = 'f1700000-0000-4000-8000-000000000101';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 1 then
+    raise exception 'Expected employee submit transition to affect one row, got %', v_rows;
+  end if;
+end $$;
+
+reset role;
+update public.review_cycle
+set status = 'manager_eval'
+where id = 'f1700000-0000-4000-8000-000000000100';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000002', true);
+do $$
+declare
+  v_rows integer;
+  v_self numeric;
+  v_manager numeric;
+  v_status public.goal_plan_status;
+  v_scales integer[];
+begin
+  update public.goal
+  set manager_rating = case id
+        when 'f1700000-0000-4000-8000-000000000104'::uuid then 3.00
+        when 'f1700000-0000-4000-8000-000000000105'::uuid then 8.00
+        when 'f1700000-0000-4000-8000-000000000106'::uuid then 4.00
+      end,
+      manager_comment = 'Completed before manager review transition.'
+  where id in (
+    'f1700000-0000-4000-8000-000000000104',
+    'f1700000-0000-4000-8000-000000000105',
+    'f1700000-0000-4000-8000-000000000106'
+  );
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 3 then
+    raise exception 'Expected three manager-rating updates, got %', v_rows;
+  end if;
+
+  select public.compute_goal_plan_rating(
+    'f1700000-0000-4000-8000-000000000101',
+    'manager'
+  ) into v_manager;
+
+  update public.employee_goal_plan
+  set status = 'manager_reviewed'
+  where id = 'f1700000-0000-4000-8000-000000000101';
+  get diagnostics v_rows = row_count;
+
+  select
+    max(overall_score) filter (where rating_type = 'self'::public.rating_type),
+    max(overall_score) filter (where rating_type = 'manager'::public.rating_type)
+  into v_self, v_manager
+  from public.goal_plan_rating
+  where employee_goal_plan_id = 'f1700000-0000-4000-8000-000000000101';
+
+  select status
+  into v_status
+  from public.employee_goal_plan
+  where id = 'f1700000-0000-4000-8000-000000000101';
+
+  select array_agg(distinct rating_scale_max order by rating_scale_max)
+  into v_scales
+  from public.goal
+  where id in (
+    'f1700000-0000-4000-8000-000000000104',
+    'f1700000-0000-4000-8000-000000000105',
+    'f1700000-0000-4000-8000-000000000106'
+  );
+
+  if v_rows <> 1
+     or v_self <> 4.400
+     or v_manager <> 3.800
+     or v_status <> 'manager_reviewed'::public.goal_plan_status
+     or v_scales <> array[5, 10]::integer[] then
+    raise exception
+      'Unexpected round trip: rows %, self %, manager %, status %, scales %',
+      v_rows,
+      v_self,
+      v_manager,
+      v_status,
+      v_scales;
+  end if;
+
+  raise notice 'PASS: full mixed-scale round trip computes 4.400 self / 3.800 manager and reaches manager_reviewed';
+end $$;
+rollback;
+
+\echo 'ALL 46 CHECKS PASSED'
