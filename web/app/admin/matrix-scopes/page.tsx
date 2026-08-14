@@ -8,6 +8,7 @@ import {
   loadAllProfiles,
   loadExistingScopeGrants,
   loadScopeTargets,
+  requireHrAdmin,
   type ScopeTarget,
 } from "@/lib/admin-queries";
 
@@ -23,6 +24,9 @@ import {
  */
 export default async function MatrixScopesPage() {
   const supabase = await createClient();
+  // Re-run independently of layout.tsx: layout and page render concurrently,
+  // so the layout's redirect does not prevent these loaders from executing.
+  await requireHrAdmin(supabase);
 
   const [people, plans, grants] = await Promise.all([
     loadAllProfiles(supabase),

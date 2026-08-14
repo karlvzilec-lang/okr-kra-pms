@@ -19,7 +19,9 @@
 //     That read authority is exactly what the cascade RPC needs, so anything
 //     this returns is by construction a legal cascade source.
 
+import { redirect } from "next/navigation";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { isPasswordExpired } from "@/lib/password";
 import type {
   Goal,
   GoalPlanStatus,
@@ -35,6 +37,56 @@ const PROFILE_COLUMNS =
 function firstOf<T>(value: T | T[] | null): T | null {
   if (!value) return null;
   return Array.isArray(value) ? (value[0] ?? null) : value;
+}
+
+// ---------------------------------------------------------------------------
+// The gate
+// ---------------------------------------------------------------------------
+
+/**
+ * Auth + password-expiry + HR check, run by the layout AND independently by
+ * every page beneath it.
+ *
+ * The repetition is deliberate and was found the hard way: in the App Router a
+ * layout and the page inside it render CONCURRENTLY. A redirect() thrown in
+ * the layout sets the 307 on the response, but it does not stop the page from
+ * having already rendered — its loaders still run, and its output is still
+ * serialized into the RSC flight payload of that redirect response. A probe of
+ * GET /admin with no session cookie confirmed it: the status line said 307
+ * /login while the body carried the rendered employee-directory markup.
+ *
+ * So a layout gate is a redirect, not an authorization boundary. RLS still
+ * scopes every row (which is why this was a structure-and-queries exposure
+ * rather than a data breach), but running privileged loaders for a caller who
+ * was just redirected away is not a thing to leave in place. Calling this at
+ * the top of each page stops execution before any query is issued.
+ *
+ * Password expiry is checked BEFORE the HR flag on purpose, matching
+ * /calibration and /review-cycles: an expired credential must not be able to
+ * probe who holds HR admin by telling a 403 apart from a redirect.
+ */
+export async function requireHrAdmin(supabase: SupabaseClient): Promise<void> {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    redirect("/login");
+  }
+
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("is_hr_admin, password_changed_at")
+    .eq("id", user.id)
+    .single();
+
+  if (isPasswordExpired(profile?.password_changed_at ?? null)) {
+    redirect("/change-password");
+  }
+
+  if (!profile?.is_hr_admin) {
+    redirect("/review");
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -3,16 +3,22 @@ import { ArrowLeft } from "@phosphor-icons/react/dist/ssr/ArrowLeft";
 import { createClient } from "@/lib/supabase/server";
 import { EmployeeCreateForm } from "@/components/admin/employee-create-form";
 import { EmployeeEditForm } from "@/components/admin/employee-edit-form";
-import { loadAllProfiles } from "@/lib/admin-queries";
+import { loadAllProfiles, requireHrAdmin } from "@/lib/admin-queries";
 
 /**
  * The employee directory: who exists, who reports to whom, who holds HR admin.
  *
- * Auth, password expiry and the HR check all happen in layout.tsx, which every
- * route under /admin passes through. This page reads through the ordinary
- * cookie-backed client, so what it lists is what RLS lets the caller see — the
- * layout gate is what makes that set mean "everyone" rather than "me and my
- * reports".
+ * The gate is re-run here rather than inherited from layout.tsx. A layout and
+ * its page render concurrently in the App Router, so a redirect thrown in the
+ * layout does NOT stop this page's loaders from running or keep its markup out
+ * of the response body — verified against the running server, where GET /admin
+ * with no session returned 307 /login carrying the rendered directory. RLS
+ * still scopes every row, so nothing private crossed the wire, but privileged
+ * queries must not run for someone already being redirected away.
+ *
+ * This page reads through the ordinary cookie-backed client, so what it lists
+ * is what RLS lets the caller see — the HR gate is what makes that set mean
+ * "everyone" rather than "me and my reports".
  *
  * There is no deactivate or delete control. Removing an account would cascade
  * through profiles into goal plans and ratings, and a review history that
@@ -21,6 +27,8 @@ import { loadAllProfiles } from "@/lib/admin-queries";
  */
 export default async function AdminEmployeesPage() {
   const supabase = await createClient();
+  await requireHrAdmin(supabase);
+
   const people = await loadAllProfiles(supabase);
 
   return (
