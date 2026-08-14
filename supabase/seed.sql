@@ -73,8 +73,15 @@ on conflict (id) do nothing;
 
 insert into public.review_cycle (id, name, start_date, end_date, status)
 values
-  ('22222222-2222-4222-8222-000000000001', 'FY2026 Annual Review', '2026-01-01', '2026-12-31', 'active')
+  ('22222222-2222-4222-8222-000000000001', 'FY2026 Annual Review', '2026-01-01', '2026-12-31', 'draft')
 on conflict (id) do nothing;
+
+-- Exercise the real lifecycle trigger rather than relying on table-owner
+-- privileges to seed a non-draft status directly.
+update public.review_cycle
+set status = 'active'
+where id = '22222222-2222-4222-8222-000000000001'
+  and status = 'draft';
 
 -- ---------------------------------------------------------------------------
 -- employee_goal_plan
@@ -359,25 +366,27 @@ on conflict (id) do nothing;
 
 -- ---------------------------------------------------------------------------
 -- check_in — two check-ins on ONE key result showing progression 0 -> 40 -> 70.
--- Inserted oldest-first; the later one leaves current_value at 70, which is
--- what cc...001 already holds, so score stays 0.700.
+-- The insert trigger owns checked_in_by and created_at, so the seed sets Dara's
+-- authenticated identity and does not attempt to backdate either event. The
+-- later row leaves current_value at 70, which is what cc...001 already holds,
+-- so score stays 0.700.
 -- ---------------------------------------------------------------------------
 
-insert into public.check_in (id, key_result_id, checked_in_by, new_value, note, created_at)
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', false);
+
+insert into public.check_in (id, key_result_id, checked_in_by, new_value, note)
 values
   ('dddddddd-dddd-4ddd-8ddd-000000000001',
    'cccccccc-cccc-4ccc-8ccc-000000000001',
    '11111111-1111-4111-8111-000000000004',  -- Dara, the objective owner
    40,
-   'Retry queue shipped; early numbers look right but sample is small.',
-   now() - interval '30 days'),
+   'Retry queue shipped; early numbers look right but sample is small.'),
 
   ('dddddddd-dddd-4ddd-8ddd-000000000002',
    'cccccccc-cccc-4ccc-8ccc-000000000001',
    '11111111-1111-4111-8111-000000000004',
    70,
-   'Backoff tuning landed. Holding steady at 70% across a full month.',
-   now() - interval '2 days')
+   'Backoff tuning landed. Holding steady at 70% across a full month.')
 on conflict (id) do nothing;
 
 -- ---------------------------------------------------------------------------
