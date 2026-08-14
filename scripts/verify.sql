@@ -142,6 +142,8 @@ end $$;
 -- Phase 2: matrix manager can rate a goal in her granted category (positive)
 -- ============================================================================
 begin;
+update public.review_cycle set status = 'self_eval'
+where id = '22222222-2222-4222-8222-000000000001';
 update public.review_cycle set status = 'manager_eval'
 where id = '22222222-2222-4222-8222-000000000001';
 set local role authenticated;
@@ -167,6 +169,8 @@ rollback;
 -- Phase 2: matrix manager is denied on a goal OUTSIDE her granted category (negative)
 -- ============================================================================
 begin;
+update public.review_cycle set status = 'self_eval'
+where id = '22222222-2222-4222-8222-000000000001';
 update public.review_cycle set status = 'manager_eval'
 where id = '22222222-2222-4222-8222-000000000001';
 set local role authenticated;
@@ -193,6 +197,8 @@ rollback;
 -- Phase 2: matrix manager cannot write the line-manager-only column
 -- ============================================================================
 begin;
+update public.review_cycle set status = 'self_eval'
+where id = '22222222-2222-4222-8222-000000000001';
 update public.review_cycle set status = 'manager_eval'
 where id = '22222222-2222-4222-8222-000000000001';
 set local role authenticated;
@@ -822,8 +828,12 @@ values (
   'Wrong-cycle eligibility fixture',
   '2027-01-01',
   '2027-12-31',
-  'active'
+  'draft'
 );
+
+update public.review_cycle
+set status = 'active'
+where id = 'f1600000-0000-4000-8000-000000000010';
 
 insert into public.employee_goal_plan (
   id, review_cycle_id, employee_id, status, overall_rating_scale_max
@@ -1207,8 +1217,16 @@ values (
   'Employee plan-column guard fixture',
   '2027-01-01',
   '2027-12-31',
-  'self_eval'
+  'draft'
 );
+
+update public.review_cycle
+set status = 'active'
+where id = 'f1700000-0000-4000-8000-000000000010';
+
+update public.review_cycle
+set status = 'self_eval'
+where id = 'f1700000-0000-4000-8000-000000000010';
 
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
@@ -1234,6 +1252,10 @@ rollback;
 -- manager_eval window.
 -- ============================================================================
 begin;
+update public.review_cycle
+set status = 'self_eval'
+where id = '22222222-2222-4222-8222-000000000001';
+
 update public.review_cycle
 set status = 'manager_eval'
 where id = '22222222-2222-4222-8222-000000000001';
@@ -1281,6 +1303,10 @@ rollback;
 -- ============================================================================
 begin;
 update public.review_cycle
+set status = 'self_eval'
+where id = '22222222-2222-4222-8222-000000000001';
+
+update public.review_cycle
 set status = 'manager_eval'
 where id = '22222222-2222-4222-8222-000000000001';
 
@@ -1313,6 +1339,10 @@ rollback;
 -- and every protected plan column remains unchanged.
 -- ============================================================================
 begin;
+update public.review_cycle
+set status = 'self_eval'
+where id = '22222222-2222-4222-8222-000000000001';
+
 update public.review_cycle
 set status = 'manager_eval'
 where id = '22222222-2222-4222-8222-000000000001';
@@ -1387,6 +1417,10 @@ rollback;
 -- Goal/rating Gate 1: the manager transition cannot skip directly to finalized.
 -- ============================================================================
 begin;
+update public.review_cycle
+set status = 'self_eval'
+where id = '22222222-2222-4222-8222-000000000001';
+
 update public.review_cycle
 set status = 'manager_eval'
 where id = '22222222-2222-4222-8222-000000000001';
@@ -1481,8 +1515,16 @@ values (
   'Full goal-rating round-trip fixture',
   '2028-01-01',
   '2028-12-31',
-  'self_eval'
+  'draft'
 );
+
+update public.review_cycle
+set status = 'active'
+where id = 'f1700000-0000-4000-8000-000000000100';
+
+update public.review_cycle
+set status = 'self_eval'
+where id = 'f1700000-0000-4000-8000-000000000100';
 
 insert into public.employee_goal_plan (
   id, review_cycle_id, employee_id, status, overall_rating_scale_max
@@ -1685,4 +1727,995 @@ begin
 end $$;
 rollback;
 
-\echo 'ALL 46 CHECKS PASSED'
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (1): an owner can create an objective in a cycle
+-- where they are a participant.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_rows integer;
+begin
+  insert into public.objective (
+    id, review_cycle_id, owner_id, title, description
+  )
+  values (
+    'f1800000-0000-4000-8000-000000000001',
+    '22222222-2222-4222-8222-000000000001',
+    '11111111-1111-4111-8111-000000000004',
+    'Owner-created objective verification',
+    'Positive objective insert path.'
+  );
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 1 then
+    raise exception 'Expected owner objective insert to affect one row, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: objective owner inserts into their own review cycle';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (2): owner_id cannot claim another profile.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+begin
+  begin
+    insert into public.objective (
+      review_cycle_id, owner_id, title
+    )
+    values (
+      '22222222-2222-4222-8222-000000000001',
+      '11111111-1111-4111-8111-000000000006',
+      'Forged objective owner'
+    );
+    raise exception 'ASSERTION FAILED: forged objective owner_id should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: objective insert rejects a forged owner_id with 42501';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (3): an owner cannot target an invisible cycle.
+-- ============================================================================
+begin;
+insert into public.review_cycle (id, name, start_date, end_date, status)
+values (
+  'f1800000-0000-4000-8000-000000000003',
+  'Invisible objective cycle fixture',
+  '2029-01-01',
+  '2029-12-31',
+  'draft'
+);
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+begin
+  begin
+    insert into public.objective (review_cycle_id, owner_id, title)
+    values (
+      'f1800000-0000-4000-8000-000000000003',
+      '11111111-1111-4111-8111-000000000004',
+      'Invisible-cycle objective'
+    );
+    raise exception 'ASSERTION FAILED: invisible-cycle objective insert should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: objective insert rejects an invisible cycle with 42501';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (4): objective owner inserts a pristine key result.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_current numeric;
+  v_score numeric;
+begin
+  insert into public.key_result (
+    id, objective_id, title, metric_unit, start_value, target_value
+  )
+  values (
+    'f1800000-0000-4000-8000-000000000004',
+    'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+    'Pristine key result',
+    'percent',
+    0,
+    100
+  )
+  returning current_value, score into v_current, v_score;
+
+  if v_current is not null or v_score is not null then
+    raise exception 'Expected initial current_value/score to be null, got % / %', v_current, v_score;
+  end if;
+
+  begin
+    insert into public.key_result (
+      objective_id, title, start_value, target_value, current_value
+    )
+    values (
+      'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+      'Owner-forged initial current value',
+      0,
+      100,
+      50
+    );
+    raise exception 'ASSERTION FAILED: owner-forged initial current_value should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  begin
+    insert into public.key_result (
+      objective_id, title, start_value, target_value, score_override
+    )
+    values (
+      'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+      'Owner-forged initial score override',
+      0,
+      100,
+      0.900
+    );
+    raise exception 'ASSERTION FAILED: owner-forged initial score_override should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: owner key-result insert starts pristine and rejects protected initial values';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (5): a non-owner cannot add a key result.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    insert into public.key_result (
+      objective_id, title, start_value, target_value
+    )
+    values (
+      'bbbbbbbb-bbbb-4bbb-8bbb-000000000002',
+      'Non-owner key result',
+      0,
+      100
+    );
+    raise exception 'ASSERTION FAILED: non-owner key-result insert should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: non-owner key-result insert is rejected with 42501';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (6): direct derived/HR-only key-result writes are
+-- rejected for an owner, while HR can set score_override.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+begin
+  begin
+    update public.key_result
+    set current_value = 88
+    where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+    raise exception 'ASSERTION FAILED: owner direct current_value update should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  begin
+    update public.key_result
+    set score = 0.123
+    where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+    raise exception 'ASSERTION FAILED: owner direct score update should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  begin
+    update public.key_result
+    set score_override = 0.900
+    where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+    raise exception 'ASSERTION FAILED: owner score_override update should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: owner direct current_value, score, and score_override writes are rejected with 42501';
+end $$;
+
+reset role;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows integer;
+  v_override numeric;
+begin
+  begin
+    update public.key_result
+    set current_value = 88
+    where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+    raise exception 'ASSERTION FAILED: HR direct current_value update should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  update public.key_result
+  set score_override = 0.900
+  where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+  get diagnostics v_rows = row_count;
+
+  select score_override into v_override
+  from public.key_result
+  where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+
+  if v_rows <> 1 or v_override <> 0.900 then
+    raise exception 'Expected HR score_override update, got rows % / override %', v_rows, v_override;
+  end if;
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (7): owner structural key-result updates succeed.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_rows integer;
+  v_title text;
+  v_target numeric;
+  v_score numeric;
+begin
+  update public.key_result
+  set title = 'Structurally updated key result',
+      target_value = 200
+  where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+  get diagnostics v_rows = row_count;
+
+  select title, target_value, score
+  into v_title, v_target, v_score
+  from public.key_result
+  where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+
+  if v_rows <> 1
+     or v_title <> 'Structurally updated key result'
+     or v_target <> 200
+     or v_score <> 0.350 then
+    raise exception 'Unexpected structural update: rows %, title %, target %, score %',
+      v_rows, v_title, v_target, v_score;
+  end if;
+
+  raise notice 'PASS: owner structural key-result update succeeds and recomputes score';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (8): check-in propagation crosses the direct-write
+-- guard and updates both current_value and score.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_current numeric;
+  v_score numeric;
+begin
+  insert into public.check_in (key_result_id, checked_in_by, new_value, note)
+  values (
+    'cccccccc-cccc-4ccc-8ccc-000000000001',
+    '11111111-1111-4111-8111-000000000004',
+    55,
+    'Propagation regression verification.'
+  );
+
+  select current_value, score into v_current, v_score
+  from public.key_result
+  where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+
+  if v_current <> 55 or v_score <> 0.550 then
+    raise exception 'Expected propagated current_value/score 55/0.550, got %/%', v_current, v_score;
+  end if;
+
+  raise notice 'PASS: check-in propagation remains valid through the key-result guard';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (9): a non-owner/non-HR caller cannot check in.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    insert into public.check_in (key_result_id, checked_in_by, new_value, note)
+    values (
+      'cccccccc-cccc-4ccc-8ccc-000000000003',
+      '11111111-1111-4111-8111-000000000006',
+      10,
+      'Non-owner check-in must fail.'
+    );
+    raise exception 'ASSERTION FAILED: non-owner check-in should have been rejected';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: non-owner check-in is rejected with 42501';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (10): owner check-in UPDATE/DELETE are silent
+-- zero-row operations because no corresponding policies exist.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_rows integer;
+begin
+  update public.check_in
+  set note = 'Owner rewrite must not persist.'
+  where id = 'dddddddd-dddd-4ddd-8ddd-000000000001';
+  get diagnostics v_rows = row_count;
+  if v_rows <> 0 then
+    raise exception 'Expected owner check-in UPDATE to affect zero rows, got %', v_rows;
+  end if;
+
+  delete from public.check_in
+  where id = 'dddddddd-dddd-4ddd-8ddd-000000000001';
+  get diagnostics v_rows = row_count;
+  if v_rows <> 0 then
+    raise exception 'Expected owner check-in DELETE to affect zero rows, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: owner check-in UPDATE/DELETE are immutable zero-row operations';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (11): HR also cannot UPDATE/DELETE check-ins; an
+-- authenticated parent key-result delete still physically cascades to history.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows integer;
+begin
+  update public.check_in
+  set note = 'HR rewrite must not persist.'
+  where id = 'dddddddd-dddd-4ddd-8ddd-000000000001';
+  get diagnostics v_rows = row_count;
+  if v_rows <> 0 then
+    raise exception 'Expected HR check-in UPDATE to affect zero rows, got %', v_rows;
+  end if;
+
+  delete from public.check_in
+  where id = 'dddddddd-dddd-4ddd-8ddd-000000000001';
+  get diagnostics v_rows = row_count;
+  if v_rows <> 0 then
+    raise exception 'Expected HR check-in DELETE to affect zero rows, got %', v_rows;
+  end if;
+end $$;
+
+reset role;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_rows integer;
+begin
+  delete from public.key_result
+  where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 1 then
+    raise exception 'Expected owner parent key-result delete to affect one row, got %', v_rows;
+  end if;
+end $$;
+
+reset role;
+do $$
+declare
+  v_children integer;
+begin
+  select count(*) into v_children
+  from public.check_in
+  where key_result_id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+
+  if v_children <> 0 then
+    raise exception 'Expected key-result cascade to remove all check-ins, got %', v_children;
+  end if;
+
+  raise notice 'PASS: HR check-ins are immutable and parent cascade-delete still succeeds';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (12): checked_in_by payload spoofing is overwritten.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_id uuid;
+  v_checked_in_by uuid;
+begin
+  insert into public.check_in (
+    key_result_id, checked_in_by, new_value, note
+  )
+  values (
+    'cccccccc-cccc-4ccc-8ccc-000000000001',
+    '11111111-1111-4111-8111-000000000006',
+    60,
+    'Spoofed actor verification.'
+  )
+  returning id into v_id;
+
+  select checked_in_by into v_checked_in_by
+  from public.check_in
+  where id = v_id;
+
+  if v_checked_in_by <> '11111111-1111-4111-8111-000000000004'::uuid then
+    raise exception 'Expected checked_in_by to be overwritten to Dara, got %', v_checked_in_by;
+  end if;
+
+  raise notice 'PASS: check-in actor spoof is overwritten with auth.uid()';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (13): created_at payload backdating is overwritten.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_created_at timestamptz;
+begin
+  insert into public.check_in (
+    key_result_id, checked_in_by, new_value, note, created_at
+  )
+  values (
+    'cccccccc-cccc-4ccc-8ccc-000000000001',
+    '11111111-1111-4111-8111-000000000004',
+    61,
+    'Spoofed timestamp verification.',
+    '2000-01-01 00:00:00+00'
+  )
+  returning created_at into v_created_at;
+
+  if v_created_at < current_timestamp - interval '5 seconds' then
+    raise exception 'Expected a now-ish created_at, got backdated value %', v_created_at;
+  end if;
+
+  raise notice 'PASS: check-in created_at spoof is overwritten with now()';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (14): review cycles must be born in draft.
+-- ============================================================================
+begin;
+do $$
+begin
+  begin
+    insert into public.review_cycle (name, start_date, end_date, status)
+    values ('Invalid initial cycle status', '2030-01-01', '2030-12-31', 'active');
+    raise exception 'ASSERTION FAILED: non-draft review-cycle insert should have been rejected';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: non-draft review-cycle insert is rejected with 55000';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (15): one exact forward lifecycle step succeeds.
+-- ============================================================================
+begin;
+insert into public.review_cycle (id, name, start_date, end_date, status)
+values (
+  'f1800000-0000-4000-8000-000000000015',
+  'Valid forward-cycle fixture',
+  '2030-01-01',
+  '2030-12-31',
+  'draft'
+);
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows integer;
+  v_status public.review_cycle_status;
+  v_name text;
+begin
+  update public.review_cycle
+  set status = 'active'
+  where id = 'f1800000-0000-4000-8000-000000000015';
+  get diagnostics v_rows = row_count;
+
+  select status into v_status
+  from public.review_cycle
+  where id = 'f1800000-0000-4000-8000-000000000015';
+
+  if v_rows <> 1 or v_status <> 'active'::public.review_cycle_status then
+    raise exception 'Expected one valid forward transition to active, got rows % / status %', v_rows, v_status;
+  end if;
+
+  update public.review_cycle
+  set name = 'Valid forward-cycle fixture renamed'
+  where id = 'f1800000-0000-4000-8000-000000000015';
+  get diagnostics v_rows = row_count;
+
+  select name into v_name
+  from public.review_cycle
+  where id = 'f1800000-0000-4000-8000-000000000015';
+
+  if v_rows <> 1 or v_name <> 'Valid forward-cycle fixture renamed' then
+    raise exception 'Expected status-preserving cycle edit, got rows % / name %', v_rows, v_name;
+  end if;
+
+  raise notice 'PASS: exact next review-cycle transition and status-preserving edit succeed';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (16): lifecycle steps cannot be skipped.
+-- ============================================================================
+begin;
+insert into public.review_cycle (id, name, start_date, end_date, status)
+values (
+  'f1800000-0000-4000-8000-000000000016',
+  'Cycle skip fixture',
+  '2030-01-01',
+  '2030-12-31',
+  'draft'
+);
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+begin
+  begin
+    update public.review_cycle
+    set status = 'manager_eval'
+    where id = 'f1800000-0000-4000-8000-000000000016';
+    raise exception 'ASSERTION FAILED: review-cycle status skip should have been rejected';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: review-cycle status skip is rejected with 55000';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (17): lifecycle status cannot move backward.
+-- ============================================================================
+begin;
+insert into public.review_cycle (id, name, start_date, end_date, status)
+values (
+  'f1800000-0000-4000-8000-000000000017',
+  'Cycle backward fixture',
+  '2030-01-01',
+  '2030-12-31',
+  'draft'
+);
+update public.review_cycle
+set status = 'active'
+where id = 'f1800000-0000-4000-8000-000000000017';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+begin
+  begin
+    update public.review_cycle
+    set status = 'draft'
+    where id = 'f1800000-0000-4000-8000-000000000017';
+    raise exception 'ASSERTION FAILED: backward review-cycle transition should have been rejected';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: backward review-cycle transition is rejected with 55000';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (18): a closed cycle cannot be reopened.
+-- ============================================================================
+begin;
+insert into public.review_cycle (id, name, start_date, end_date, status)
+values (
+  'f1800000-0000-4000-8000-000000000018',
+  'Closed-cycle reopen fixture',
+  '2030-01-01',
+  '2030-12-31',
+  'draft'
+);
+update public.review_cycle set status = 'active'
+where id = 'f1800000-0000-4000-8000-000000000018';
+update public.review_cycle set status = 'self_eval'
+where id = 'f1800000-0000-4000-8000-000000000018';
+update public.review_cycle set status = 'manager_eval'
+where id = 'f1800000-0000-4000-8000-000000000018';
+update public.review_cycle set status = 'closed'
+where id = 'f1800000-0000-4000-8000-000000000018';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows integer;
+begin
+  update public.review_cycle
+  set name = 'Closed-cycle non-status edit remains allowed'
+  where id = 'f1800000-0000-4000-8000-000000000018';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 1 then
+    raise exception 'Expected closed-cycle non-status edit to affect one row, got %', v_rows;
+  end if;
+
+  begin
+    update public.review_cycle
+    set status = 'active'
+    where id = 'f1800000-0000-4000-8000-000000000018';
+    raise exception 'ASSERTION FAILED: closed review cycle should not reopen';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: reopening a closed review cycle is rejected with 55000';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (19): non-HR cycle updates remain silent no-ops.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_rows integer;
+begin
+  update public.review_cycle
+  set status = 'self_eval'
+  where id = '22222222-2222-4222-8222-000000000001';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 0 then
+    raise exception 'Expected non-HR review-cycle update to affect zero rows, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: non-HR review-cycle update remains a zero-row RLS no-op';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Shared closed-cycle fixture for assertions 20-22.
+-- ============================================================================
+begin;
+insert into public.review_cycle (id, name, start_date, end_date, status)
+values (
+  'f1800000-0000-4000-8000-000000000020',
+  'Closed OKR-write fixture',
+  '2031-01-01',
+  '2031-12-31',
+  'draft'
+);
+
+insert into public.objective (
+  id, review_cycle_id, owner_id, title
+)
+values (
+  'f1800000-0000-4000-8000-000000000021',
+  'f1800000-0000-4000-8000-000000000020',
+  '11111111-1111-4111-8111-000000000004',
+  'Objective created before close'
+);
+
+insert into public.key_result (
+  id, objective_id, title, start_value, target_value
+)
+values (
+  'f1800000-0000-4000-8000-000000000022',
+  'f1800000-0000-4000-8000-000000000021',
+  'Key result created before close',
+  0,
+  100
+);
+
+update public.review_cycle set status = 'active'
+where id = 'f1800000-0000-4000-8000-000000000020';
+update public.review_cycle set status = 'self_eval'
+where id = 'f1800000-0000-4000-8000-000000000020';
+update public.review_cycle set status = 'manager_eval'
+where id = 'f1800000-0000-4000-8000-000000000020';
+update public.review_cycle set status = 'closed'
+where id = 'f1800000-0000-4000-8000-000000000020';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+
+-- Review-cycle / OKR Gate 1 (20): closed-cycle objective INSERT/UPDATE/DELETE
+-- all fail with lifecycle-state SQLSTATE, including for HR.
+do $$
+begin
+  begin
+    insert into public.objective (review_cycle_id, owner_id, title)
+    values (
+      'f1800000-0000-4000-8000-000000000020',
+      '11111111-1111-4111-8111-000000000001',
+      'HR closed-cycle insert'
+    );
+    raise exception 'ASSERTION FAILED: HR objective insert into closed cycle should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  begin
+    update public.objective
+    set title = 'HR closed-cycle update'
+    where id = 'f1800000-0000-4000-8000-000000000021';
+    raise exception 'ASSERTION FAILED: HR objective update in closed cycle should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  begin
+    delete from public.objective
+    where id = 'f1800000-0000-4000-8000-000000000021';
+    raise exception 'ASSERTION FAILED: HR objective delete in closed cycle should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: closed-cycle objective writes reject HR with 55000';
+end $$;
+
+-- Review-cycle / OKR Gate 1 (21): closed-cycle key-result INSERT/UPDATE/DELETE
+-- all fail with lifecycle-state SQLSTATE, including for HR.
+do $$
+begin
+  begin
+    insert into public.key_result (objective_id, title, start_value, target_value)
+    values (
+      'f1800000-0000-4000-8000-000000000021',
+      'HR closed-cycle key-result insert',
+      0,
+      100
+    );
+    raise exception 'ASSERTION FAILED: HR key-result insert into closed cycle should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  begin
+    update public.key_result
+    set title = 'HR closed-cycle key-result update'
+    where id = 'f1800000-0000-4000-8000-000000000022';
+    raise exception 'ASSERTION FAILED: HR key-result update in closed cycle should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  begin
+    delete from public.key_result
+    where id = 'f1800000-0000-4000-8000-000000000022';
+    raise exception 'ASSERTION FAILED: HR key-result delete in closed cycle should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: closed-cycle key-result writes reject HR with 55000';
+end $$;
+
+-- Review-cycle / OKR Gate 1 (22): closed-cycle check-ins reject HR too.
+do $$
+begin
+  begin
+    insert into public.check_in (key_result_id, checked_in_by, new_value, note)
+    values (
+      'f1800000-0000-4000-8000-000000000022',
+      '11111111-1111-4111-8111-000000000001',
+      50,
+      'HR closed-cycle check-in'
+    );
+    raise exception 'ASSERTION FAILED: HR check-in on closed cycle should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: closed-cycle check-in rejects HR with 55000';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (23): score clamps to zero below start_value.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_current numeric;
+  v_score numeric;
+begin
+  insert into public.check_in (key_result_id, checked_in_by, new_value, note)
+  values (
+    'cccccccc-cccc-4ccc-8ccc-000000000001',
+    '11111111-1111-4111-8111-000000000004',
+    -25,
+    'Below-start lower-clamp verification.'
+  );
+
+  select current_value, score into v_current, v_score
+  from public.key_result
+  where id = 'cccccccc-cccc-4ccc-8ccc-000000000001';
+
+  if v_current <> -25 or v_score <> 0.000 then
+    raise exception 'Expected below-start current_value/score -25/0.000, got %/%', v_current, v_score;
+  end if;
+
+  raise notice 'PASS: key-result score clamps to zero below start_value';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (24): degenerate ranges keep score null.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_current numeric;
+  v_score numeric;
+begin
+  insert into public.key_result (
+    id, objective_id, title, start_value, target_value
+  )
+  values (
+    'f1800000-0000-4000-8000-000000000024',
+    'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+    'Degenerate range key result',
+    5,
+    5
+  );
+
+  insert into public.check_in (key_result_id, checked_in_by, new_value, note)
+  values (
+    'f1800000-0000-4000-8000-000000000024',
+    '11111111-1111-4111-8111-000000000004',
+    10,
+    'Degenerate range verification.'
+  );
+
+  select current_value, score into v_current, v_score
+  from public.key_result
+  where id = 'f1800000-0000-4000-8000-000000000024';
+
+  if v_current <> 10 or v_score is not null then
+    raise exception 'Expected degenerate current_value/score 10/null, got %/%', v_current, v_score;
+  end if;
+
+  raise notice 'PASS: degenerate key-result range yields null score without error';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Review-cycle / OKR Gate 1 (25): sequential check-ins are last-write-wins.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_current numeric;
+  v_score numeric;
+  v_check_ins integer;
+begin
+  insert into public.key_result (
+    id, objective_id, title, start_value, target_value
+  )
+  values (
+    'f1800000-0000-4000-8000-000000000025',
+    'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+    'Last-write-wins key result',
+    0,
+    100
+  );
+
+  insert into public.check_in (key_result_id, checked_in_by, new_value, note)
+  values
+    (
+      'f1800000-0000-4000-8000-000000000025',
+      '11111111-1111-4111-8111-000000000004',
+      80,
+      'First sequential check-in.'
+    ),
+    (
+      'f1800000-0000-4000-8000-000000000025',
+      '11111111-1111-4111-8111-000000000004',
+      25,
+      'Second sequential check-in.'
+    );
+
+  select current_value, score into v_current, v_score
+  from public.key_result
+  where id = 'f1800000-0000-4000-8000-000000000025';
+
+  select count(*) into v_check_ins
+  from public.check_in
+  where key_result_id = 'f1800000-0000-4000-8000-000000000025';
+
+  if v_current <> 25 or v_score <> 0.250 or v_check_ins <> 2 then
+    raise exception 'Expected last-write-wins current/score/count 25/0.250/2, got %/%/%',
+      v_current, v_score, v_check_ins;
+  end if;
+
+  raise notice 'PASS: second sequential check-in wins even when progress decreases';
+end $$;
+rollback;
+
+\echo 'ALL 71 CHECKS PASSED'
