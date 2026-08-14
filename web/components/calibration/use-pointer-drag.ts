@@ -267,6 +267,17 @@ export function usePointerDrag({ onDrop, disabled }: Options) {
     };
   }, [autoScroll, columnAt, reset, stopFrameLoop]);
 
+  /**
+   * Clear a stale `lastOutcome` once its consequence has been handled elsewhere
+   * (e.g. the Adjust modal it opened was saved). Without this, a save that
+   * lands the participant back in the column it was dropped on re-triggers the
+   * "already in <band>, nothing changed" no-op text on the next render, even
+   * though the save just changed the score.
+   */
+  const clearOutcome = useCallback(() => {
+    setState((prev) => (prev.lastOutcome ? { ...prev, lastOutcome: null } : prev));
+  }, []);
+
   /** Attach to a drag handle's `onPointerDown`. */
   const startDrag = useCallback(
     (event: React.PointerEvent, participantId: string, label: string) => {
@@ -301,5 +312,5 @@ export function usePointerDrag({ onDrop, disabled }: Options) {
     [],
   );
 
-  return { ...state, startDrag };
+  return { ...state, startDrag, clearOutcome };
 }

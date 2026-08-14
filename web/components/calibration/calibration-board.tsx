@@ -92,6 +92,7 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
     }
 
     setAdjustTarget(null);
+    clearOutcome();
     refresh();
   }
 
@@ -180,7 +181,7 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
     [detail.bands, detail.participants, locked],
   );
 
-  const { draggingId, dragOverColumn, preview, lastOutcome, startDrag } = usePointerDrag({
+  const { draggingId, dragOverColumn, preview, lastOutcome, startDrag, clearOutcome } = usePointerDrag({
     onDrop: handleDrop,
     disabled: locked,
   });
@@ -475,6 +476,10 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
           onClose={() => {
             setAdjustTarget(null);
             setModalError(null);
+            // A drop-triggered open leaves lastOutcome describing the drop; if
+            // the facilitator cancels instead of saving, that "confirm the
+            // proposed score" text would otherwise linger and mislead.
+            clearOutcome();
           }}
         />
       )}
