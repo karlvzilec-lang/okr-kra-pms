@@ -100,17 +100,23 @@ type RawProfileRow = Profile & {
 };
 
 /**
- * Every profile visible to the caller, by name. The manager join uses the
- * explicit `manager:profiles!manager_id` alias because profiles references
- * itself — without naming the FK, PostgREST can't tell which direction of the
- * self-relationship is wanted.
+ * Every profile visible to the caller, by name. The manager join is aliased
+ * directly off the `manager_id` column (`manager:manager_id(...)`), not off
+ * `profiles!manager_id`. profiles self-references, and PostgREST resolves a
+ * `!manager_id` hint against a self-join as the *reverse* one-to-many side
+ * (rows whose manager_id points at this row, i.e. direct reports) rather
+ * than the intended many-to-one (this row's own manager) -- confirmed
+ * directly against the REST API: `profiles!manager_id` returned each
+ * manager's list of reports, while `manager_id(full_name)` returns the one
+ * row `manager_id` actually points to. The column-only form is unambiguous
+ * because a single column can only be the "many" side of its own FK.
  */
 export async function loadAllProfiles(
   supabase: SupabaseClient,
 ): Promise<ProfileWithManager[]> {
   const { data } = await supabase
     .from("profiles")
-    .select(`${PROFILE_COLUMNS}, manager:profiles!manager_id(full_name)`)
+    .select(`${PROFILE_COLUMNS}, manager:manager_id(full_name)`)
     .order("full_name", { ascending: true });
 
   return ((data ?? []) as unknown as RawProfileRow[]).map((row) => ({

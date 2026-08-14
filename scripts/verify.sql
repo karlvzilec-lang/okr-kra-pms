@@ -3577,4 +3577,43 @@ begin
 end $$;
 rollback;
 
-\echo 'ALL 95 CHECKS PASSED'
+-- ============================================================================
+-- Admin UI Gate 1 (23): INSERT ... RETURNING succeeds for a non-HR employee
+-- inserting their own goal. This is the exact shape PostgREST issues for
+-- `.insert().select().single()`, which goal-plan-editor.tsx's addGoal()
+-- uses. Regression guard for a latent Phase 1 bug in goal_select_scoped
+-- (fixed in 0021): its self-referencing can_read_goal()/is_goal_participant()
+-- branch re-queries goal by id, which runs under a snapshot that predates
+-- the row's own insertion when evaluated as part of the same statement's
+-- RETURNING check, so a non-HR employee's own create-and-read-back failed
+-- with a false RLS violation even though the row was correctly written.
+-- Plain INSERT without RETURNING does not exercise this path, so a
+-- dedicated RETURNING-based case is required to catch a regression.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000005', true);
+do $$
+declare
+  v_id uuid;
+begin
+  insert into public.goal (
+    kra_category_id, title, weight, rating_scale_max
+  )
+  values (
+    '44444444-4444-4444-8444-00000000000d',
+    'RETURNING regression fixture',
+    0,
+    5
+  )
+  returning id into v_id;
+
+  if v_id is null then
+    raise exception 'ASSERTION FAILED: INSERT ... RETURNING did not return the new goal id';
+  end if;
+
+  raise notice 'PASS: non-HR employee goal INSERT ... RETURNING succeeds';
+end $$;
+rollback;
+
+\echo 'ALL 96 CHECKS PASSED'
