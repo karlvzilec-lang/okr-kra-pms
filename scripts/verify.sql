@@ -1759,6 +1759,47 @@ end $$;
 rollback;
 
 -- ============================================================================
+-- Review-cycle / OKR Gate 1 (1b): INSERT ... RETURNING succeeds for a non-HR
+-- owner. This is the exact shape PostgREST issues for `.insert().select()`,
+-- which the app's create-objective form uses. Regression guard for a latent
+-- Phase 2 bug in objective_select_scoped: its self-referencing branch
+-- (re-querying objective by id to check owner_id = auth.uid()) ran under a
+-- snapshot that predates the row's own insertion when evaluated as part of
+-- the same INSERT statement's RETURNING check, so a non-HR owner's own
+-- create-and-read-back failed with a false RLS violation even though the
+-- row was correctly written and a separate, later SELECT saw it fine. Fixed
+-- in 0019 by checking owner_id = auth.uid() directly in the USING clause
+-- before falling back to can_read_objective(). Plain INSERT without
+-- RETURNING (as in (1) above) does not exercise this path, which is why a
+-- dedicated RETURNING-based case is required to catch a regression.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_id uuid;
+begin
+  insert into public.objective (
+    review_cycle_id, owner_id, title, description
+  )
+  values (
+    '22222222-2222-4222-8222-000000000001',
+    '11111111-1111-4111-8111-000000000004',
+    'RETURNING regression fixture',
+    'Proves insert-and-read-back works for a non-HR owner.'
+  )
+  returning id into v_id;
+
+  if v_id is null then
+    raise exception 'ASSERTION FAILED: INSERT ... RETURNING did not return the new objective id';
+  end if;
+
+  raise notice 'PASS: non-HR owner objective INSERT ... RETURNING succeeds';
+end $$;
+rollback;
+
+-- ============================================================================
 -- Review-cycle / OKR Gate 1 (2): owner_id cannot claim another profile.
 -- ============================================================================
 begin;
@@ -2718,4 +2759,4 @@ begin
 end $$;
 rollback;
 
-\echo 'ALL 71 CHECKS PASSED'
+\echo 'ALL 72 CHECKS PASSED'
