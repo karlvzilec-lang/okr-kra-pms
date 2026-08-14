@@ -93,6 +93,50 @@ export type ManagerReportPlan = {
   manager_rated_count: number;
 };
 
+// ---------------------------------------------------------------------------
+// Review cycle management / OKR authoring (additive — every type above is what
+// /review, /goals and /calibration already depend on and is left untouched).
+// ---------------------------------------------------------------------------
+
+export type ReviewCycle = {
+  id: string;
+  name: string;
+  start_date: string;
+  end_date: string;
+  status: ReviewCycleStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+/** An append-only progress event on a key result. Never edited, never deleted. */
+export type CheckIn = {
+  id: string;
+  key_result_id: string;
+  checked_in_by: string;
+  new_value: number;
+  note: string | null;
+  created_at: string;
+};
+
+/**
+ * An objective as listed on /objectives: the row plus its cycle's name and
+ * status, which together decide whether it is still writable — a closed cycle
+ * freezes every OKR write at the database level, not just in this UI.
+ */
+export type ObjectiveWithCycle = {
+  id: string;
+  review_cycle_id: string;
+  owner_id: string;
+  title: string;
+  description: string | null;
+  status: "active" | "closed";
+  created_at: string;
+  updated_at: string;
+  review_cycle_name: string | null;
+  review_cycle_status: ReviewCycleStatus | null;
+  key_result_count: number;
+};
+
 export type ReviewSummary = {
   review_cycle_id: string;
   employee_id: string;

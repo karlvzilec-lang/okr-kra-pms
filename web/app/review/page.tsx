@@ -2,6 +2,8 @@ import { redirect } from "next/navigation";
 import { ChartLineUp } from "@phosphor-icons/react/dist/ssr/ChartLineUp";
 import { Target } from "@phosphor-icons/react/dist/ssr/Target";
 import { SlidersHorizontal } from "@phosphor-icons/react/dist/ssr/SlidersHorizontal";
+import { Crosshair } from "@phosphor-icons/react/dist/ssr/Crosshair";
+import { CalendarBlank } from "@phosphor-icons/react/dist/ssr/CalendarBlank";
 import { UsersThree } from "@phosphor-icons/react/dist/ssr/UsersThree";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
@@ -97,6 +99,14 @@ export default async function ReviewPage() {
               Edit my goals
             </Link>
           )}
+          <Link
+            href="/objectives"
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-4 text-sm font-medium transition-colors hover:bg-[var(--muted)]"
+            style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+          >
+            <Crosshair size={16} weight="bold" aria-hidden="true" />
+            My objectives
+          </Link>
           {managesSomeone && (
             <Link
               href="/reports"
@@ -115,6 +125,16 @@ export default async function ReviewPage() {
             >
               <SlidersHorizontal size={16} weight="bold" aria-hidden="true" />
               Calibration
+            </Link>
+          )}
+          {profile?.is_hr_admin && (
+            <Link
+              href="/review-cycles"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-4 text-sm font-medium transition-colors hover:bg-[var(--muted)]"
+              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+            >
+              <CalendarBlank size={16} weight="bold" aria-hidden="true" />
+              Manage review cycles
             </Link>
           )}
           <LogoutButton />
