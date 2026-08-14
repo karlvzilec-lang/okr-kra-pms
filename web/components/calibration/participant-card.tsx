@@ -48,7 +48,11 @@ export function ParticipantCard({
           <span
             onPointerDown={onDragHandlePointerDown}
             aria-hidden="true"
-            className="-m-1 shrink-0 p-1"
+            // 44x44px tappable area (min-h-11/min-w-11), per the project's touch
+            // target convention. Negative margins keep the *visual* footprint
+            // compact: only the small grip icon is drawn, but the whole 44px box
+            // accepts the pointer.
+            className="-my-2 -ml-2 flex min-h-11 min-w-11 shrink-0 items-center justify-center"
             style={{
               touchAction: "none",
               cursor: dragging ? "grabbing" : "grab",

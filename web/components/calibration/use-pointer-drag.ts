@@ -30,6 +30,12 @@ export const DROP_TARGET_ATTR = "data-drop-column-id";
 /** Marks the horizontally scrolling board viewport. */
 export const SCROLLER_ATTR = "data-board-scroller";
 
+/** What ended the last drag. Consumed by the board's aria-live status line. */
+export type DragOutcome =
+  | { kind: "dropped"; participantId: string; label: string; columnId: string }
+  | { kind: "missed"; participantId: string; label: string }
+  | { kind: "cancelled"; participantId: string; label: string };
+
 export type PointerDragState = {
   /** Participant currently being dragged, or null when idle. */
   draggingId: string | null;
@@ -37,6 +43,12 @@ export type PointerDragState = {
   dragOverColumn: string | null;
   /** Viewport coords for the floating preview, or null when not engaged. */
   preview: { x: number; y: number; label: string } | null;
+  /**
+   * How the most recent engaged drag ended. Set as `preview` is cleared, so the
+   * status line still has something to announce after the preview is gone.
+   * Reset to null when the next drag engages.
+   */
+  lastOutcome: DragOutcome | null;
 };
 
 type Options = {
@@ -51,6 +63,7 @@ export function usePointerDrag({ onDrop, disabled }: Options) {
     draggingId: null,
     dragOverColumn: null,
     preview: null,
+    lastOutcome: null,
   });
 
   // All live drag bookkeeping lives in a ref so the window listeners, which are
@@ -65,6 +78,8 @@ export function usePointerDrag({ onDrop, disabled }: Options) {
     y: number;
     engaged: boolean;
     column: string | null;
+    /** Element holding the pointer capture, so we can release it on cleanup. */
+    captureTarget: Element | null;
   } | null>(null);
 
   const frame = useRef<number | null>(null);
@@ -86,9 +101,24 @@ export function usePointerDrag({ onDrop, disabled }: Options) {
   }, []);
 
   const reset = useCallback(() => {
+    const current = drag.current;
+    if (current?.captureTarget) {
+      // Releasing is best-effort: the browser may already have dropped the
+      // capture (that is exactly the lostpointercapture path).
+      try {
+        (current.captureTarget as HTMLElement).releasePointerCapture?.(current.pointerId);
+      } catch {
+        /* capture already gone */
+      }
+    }
     drag.current = null;
     stopFrameLoop();
-    setState({ draggingId: null, dragOverColumn: null, preview: null });
+    setState((prev) => ({
+      draggingId: null,
+      dragOverColumn: null,
+      preview: null,
+      lastOutcome: prev.lastOutcome,
+    }));
   }, [stopFrameLoop]);
 
   /** Column id under (x, y), or null. The preview is pointer-events:none. */
@@ -161,6 +191,7 @@ export function usePointerDrag({ onDrop, disabled }: Options) {
           draggingId: current.participantId,
           dragOverColumn: null,
           preview: { x: current.x, y: current.y, label: current.label },
+          lastOutcome: null,
         });
         if (frame.current === null) frame.current = requestAnimationFrame(tick);
       }
@@ -175,26 +206,60 @@ export function usePointerDrag({ onDrop, disabled }: Options) {
 
       const engaged = current.engaged;
       const participantId = current.participantId;
+      const label = current.label;
       const column = engaged ? columnAt(event.clientX, event.clientY) : null;
 
       reset();
-      if (engaged) onDropRef.current(participantId, column);
+      if (!engaged) return;
+      setState((prev) => ({
+        ...prev,
+        lastOutcome: column
+          ? { kind: "dropped", participantId, label, columnId: column }
+          : { kind: "missed", participantId, label },
+      }));
+      onDropRef.current(participantId, column);
     }
 
     function handleCancel(event: PointerEvent) {
       const current = drag.current;
       if (!current || event.pointerId !== current.pointerId) return;
+      const { engaged, label, participantId } = current;
       reset();
+      if (engaged) {
+        setState((prev) => ({
+          ...prev,
+          lastOutcome: { kind: "cancelled", participantId, label },
+        }));
+      }
+    }
+
+    // Defensive path: a pointer that is released outside the viewport, or whose
+    // capture the browser revokes for any other reason, may never deliver
+    // pointerup/pointercancel. Without this the drag would stay engaged with the
+    // rAF loop spinning, and the next unrelated pointerup could drop the card.
+    function handleLostCapture(event: PointerEvent) {
+      const current = drag.current;
+      if (!current || event.pointerId !== current.pointerId) return;
+      const { engaged, label, participantId } = current;
+      reset();
+      if (engaged) {
+        setState((prev) => ({
+          ...prev,
+          lastOutcome: { kind: "cancelled", participantId, label },
+        }));
+      }
     }
 
     window.addEventListener("pointermove", handleMove, { passive: false });
     window.addEventListener("pointerup", handleUp);
     window.addEventListener("pointercancel", handleCancel);
+    window.addEventListener("lostpointercapture", handleLostCapture);
 
     return () => {
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleUp);
       window.removeEventListener("pointercancel", handleCancel);
+      window.removeEventListener("lostpointercapture", handleLostCapture);
       // StrictMode remounts and real unmounts both land here: drop the frame
       // loop so no orphaned rAF keeps scrolling the board.
       stopFrameLoop();
@@ -210,6 +275,16 @@ export function usePointerDrag({ onDrop, disabled }: Options) {
       if (event.pointerType === "mouse" && event.button !== 0) return;
       if (drag.current) return;
 
+      // Capture on the handle itself. Pointer events keep bubbling to window, so
+      // the listeners above are unaffected, but the browser now guarantees the
+      // stream stays ours and fires lostpointercapture if it ever does not.
+      const captureTarget = event.currentTarget as Element | null;
+      try {
+        (captureTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+      } catch {
+        /* non-fatal: fall back to plain window listeners */
+      }
+
       drag.current = {
         pointerId: event.pointerId,
         participantId,
@@ -220,6 +295,7 @@ export function usePointerDrag({ onDrop, disabled }: Options) {
         y: event.clientY,
         engaged: false,
         column: null,
+        captureTarget,
       };
     },
     [],

@@ -180,7 +180,7 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
     [detail.bands, detail.participants, locked],
   );
 
-  const { draggingId, dragOverColumn, preview, startDrag } = usePointerDrag({
+  const { draggingId, dragOverColumn, preview, lastOutcome, startDrag } = usePointerDrag({
     onDrop: handleDrop,
     disabled: locked,
   });
@@ -189,6 +189,32 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
     dragOverColumn === null
       ? null
       : (columns.find((c) => c.id === dragOverColumn)?.label ?? null);
+
+  // While a drag is live the preview drives the message; once it ends, the
+  // hook's lastOutcome keeps the region non-empty so drops, misses and cancels
+  // are announced too, not just engage and hover.
+  let dragStatus = "";
+  if (preview) {
+    dragStatus = hoverColumnLabel
+      ? `Dragging ${preview.label}. Over ${hoverColumnLabel}. Release to propose a score.`
+      : `Dragging ${preview.label}. No band under pointer.`;
+  } else if (lastOutcome) {
+    if (lastOutcome.kind === "cancelled") {
+      dragStatus = `Drag of ${lastOutcome.label} cancelled. Nothing changed.`;
+    } else if (lastOutcome.kind === "missed") {
+      dragStatus = `Dropped ${lastOutcome.label} outside any band. Nothing changed.`;
+    } else {
+      const label = columns.find((c) => c.id === lastOutcome.columnId)?.label ?? null;
+      const participant = detail.participants.find((p) => p.id === lastOutcome.participantId);
+      if (!label || lastOutcome.columnId === UNASSIGNED_COLUMN_ID) {
+        dragStatus = `Dropped ${lastOutcome.label} outside any band. Nothing changed.`;
+      } else if (participant && participant.band_id === lastOutcome.columnId) {
+        dragStatus = `${lastOutcome.label} is already in ${label}. Nothing changed.`;
+      } else {
+        dragStatus = `Dropped ${lastOutcome.label} on ${label}. Confirm the proposed score in the adjust dialog.`;
+      }
+    }
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -434,11 +460,7 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
       )}
 
       <p aria-live="polite" className="sr-only">
-        {preview
-          ? hoverColumnLabel
-            ? `Dragging ${preview.label}. Over ${hoverColumnLabel}. Release to propose a score.`
-            : `Dragging ${preview.label}. No band under pointer.`
-          : ""}
+        {dragStatus}
       </p>
 
       {adjustTarget && (
