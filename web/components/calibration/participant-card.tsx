@@ -8,6 +8,7 @@ import {
   type CalibrationParticipant,
 } from "@/lib/calibration";
 import { NotePencil } from "@phosphor-icons/react/dist/csr/NotePencil";
+import { DotsSixVertical } from "@phosphor-icons/react/dist/csr/DotsSixVertical";
 
 export function ParticipantCard({
   participant,
@@ -15,16 +16,14 @@ export function ParticipantCard({
   disabled,
   dragging,
   onAdjust,
-  onDragStart,
-  onDragEnd,
+  onDragHandlePointerDown,
 }: {
   participant: CalibrationParticipant;
   scaleMax: number;
   disabled: boolean;
   dragging: boolean;
   onAdjust: () => void;
-  onDragStart: () => void;
-  onDragEnd: () => void;
+  onDragHandlePointerDown: (event: React.PointerEvent) => void;
 }) {
   const delta = scoreDelta(participant);
   const current = effectiveScore(participant);
@@ -34,24 +33,32 @@ export function ParticipantCard({
       // Drag is a convenience shortcut into the Adjust modal, never a commit —
       // dropping a card only prefills a proposed score for confirmation. The
       // button below is the real, keyboard-reachable primitive.
-      draggable={!disabled}
-      onDragStart={(event) => {
-        if (disabled) return;
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("text/plain", participant.id);
-        onDragStart();
-      }}
-      onDragEnd={onDragEnd}
       className="rounded-xl border p-3 transition-opacity"
       style={{
         backgroundColor: "var(--card)",
         borderColor: "var(--border)",
         opacity: dragging ? 0.45 : 1,
-        cursor: disabled ? "default" : "grab",
       }}
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
+        {!disabled && (
+          // The only surface that starts a drag. `touch-action: none` tells the
+          // browser up front that a touch here is never a scroll, so the rest of
+          // the card and the board keep their native scrolling behaviour.
+          <span
+            onPointerDown={onDragHandlePointerDown}
+            aria-hidden="true"
+            className="-m-1 shrink-0 p-1"
+            style={{
+              touchAction: "none",
+              cursor: dragging ? "grabbing" : "grab",
+              color: "var(--muted-foreground)",
+            }}
+          >
+            <DotsSixVertical size={18} weight="bold" />
+          </span>
+        )}
+        <div className="min-w-0 flex-1">
           <p
             className="truncate text-sm font-semibold"
             style={{ color: "var(--foreground)" }}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useCallback, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Plus } from "@phosphor-icons/react/dist/csr/Plus";
 import { LockSimple } from "@phosphor-icons/react/dist/csr/LockSimple";
@@ -11,6 +11,11 @@ import { AdjustModal } from "@/components/calibration/adjust-modal";
 import { AddParticipantModal } from "@/components/calibration/add-participant-modal";
 import { ParticipantCard } from "@/components/calibration/participant-card";
 import { SessionStatusPill } from "@/components/calibration/session-status-pill";
+import {
+  usePointerDrag,
+  DROP_TARGET_ATTR,
+  SCROLLER_ATTR,
+} from "@/components/calibration/use-pointer-drag";
 import {
   buildBoardColumns,
   calibrationErrorMessage,
@@ -41,8 +46,6 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
 
   const [adjustTarget, setAdjustTarget] = useState<AdjustTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<
     "adjust" | "add" | "finalize" | "publish" | null
   >(null);
@@ -152,29 +155,40 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
     refresh();
   }
 
-  function handleDrop(columnId: string) {
-    setDragOverColumn(null);
-    const participantId = draggingId;
-    setDraggingId(null);
+  // participantId arrives explicitly from the pointer controller rather than
+  // being read out of state at drop time, which would be a stale closure.
+  const handleDrop = useCallback(
+    (participantId: string, columnId: string | null) => {
+      if (locked || !columnId) return;
 
-    if (locked || !participantId) return;
+      const participant = detail.participants.find((p) => p.id === participantId);
+      if (!participant) return;
 
-    const participant = detail.participants.find((p) => p.id === participantId);
-    if (!participant) return;
+      // The Unassigned column isn't a band, so there is nothing to propose.
+      if (columnId === UNASSIGNED_COLUMN_ID) return;
 
-    // The Unassigned column isn't a band, so there is nothing to propose.
-    if (columnId === UNASSIGNED_COLUMN_ID) return;
+      const band = detail.bands.find((b) => b.id === columnId);
+      if (!band) return;
+      if (participant.band_id === band.id) return;
 
-    const band = detail.bands.find((b) => b.id === columnId);
-    if (!band) return;
-    if (participant.band_id === band.id) return;
+      setModalError(null);
+      setAdjustTarget({
+        participant,
+        proposedScore: proposedScoreForBand(band.min_score, band.max_score),
+      });
+    },
+    [detail.bands, detail.participants, locked],
+  );
 
-    setModalError(null);
-    setAdjustTarget({
-      participant,
-      proposedScore: proposedScoreForBand(band.min_score, band.max_score),
-    });
-  }
+  const { draggingId, dragOverColumn, preview, startDrag } = usePointerDrag({
+    onDrop: handleDrop,
+    disabled: locked,
+  });
+
+  const hoverColumnLabel =
+    dragOverColumn === null
+      ? null
+      : (columns.find((c) => c.id === dragOverColumn)?.label ?? null);
 
   return (
     <div className="flex flex-col gap-6">
@@ -305,6 +319,7 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
 
       {/* Board: horizontal scroll on narrow screens, one column per band. */}
       <div
+        {...{ [SCROLLER_ATTR]: "" }}
         className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0"
         aria-label="Calibration board"
       >
@@ -316,20 +331,7 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
             return (
               <section
                 key={column.id}
-                onDragOver={(event) => {
-                  if (!droppable) return;
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = "move";
-                  setDragOverColumn(column.id);
-                }}
-                onDragLeave={() => {
-                  setDragOverColumn((current) => (current === column.id ? null : current));
-                }}
-                onDrop={(event) => {
-                  if (!droppable) return;
-                  event.preventDefault();
-                  handleDrop(column.id);
-                }}
+                {...(droppable ? { [DROP_TARGET_ATTR]: column.id } : {})}
                 className="flex w-72 shrink-0 flex-col rounded-2xl border p-3 transition-colors"
                 style={{
                   borderColor: isDropTarget ? "var(--accent)" : "var(--border)",
@@ -372,11 +374,9 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
                             setModalError(null);
                             setAdjustTarget({ participant, proposedScore: null });
                           }}
-                          onDragStart={() => setDraggingId(participant.id)}
-                          onDragEnd={() => {
-                            setDraggingId(null);
-                            setDragOverColumn(null);
-                          }}
+                          onDragHandlePointerDown={(event) =>
+                            startDrag(event, participant.id, participant.employee_full_name)
+                          }
                         />
                         {finalized && participant.published_at === null && (
                           <button
@@ -415,6 +415,31 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
           Refreshing board...
         </p>
       )}
+
+      {preview && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none fixed z-50 rounded-xl border px-3 py-2 text-sm font-semibold shadow-lg"
+          style={{
+            left: preview.x,
+            top: preview.y,
+            transform: "translate(-50%, -50%)",
+            backgroundColor: "var(--card)",
+            borderColor: "var(--accent)",
+            color: "var(--foreground)",
+          }}
+        >
+          {preview.label}
+        </div>
+      )}
+
+      <p aria-live="polite" className="sr-only">
+        {preview
+          ? hoverColumnLabel
+            ? `Dragging ${preview.label}. Over ${hoverColumnLabel}. Release to propose a score.`
+            : `Dragging ${preview.label}. No band under pointer.`
+          : ""}
+      </p>
 
       {adjustTarget && (
         <AdjustModal
