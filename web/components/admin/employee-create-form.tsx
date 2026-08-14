@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Plus } from "@phosphor-icons/react/dist/csr/Plus";
 import { WarningCircle } from "@phosphor-icons/react/dist/csr/WarningCircle";
 import { Key } from "@phosphor-icons/react/dist/csr/Key";
-import { createEmployee } from "@/app/admin/actions";
+import { createEmployeeAction } from "@/app/admin/actions";
 import { validateEmployeeDraft } from "@/lib/admin";
 import type { ProfileWithManager } from "@/lib/admin-queries";
 
@@ -48,7 +48,7 @@ export function EmployeeCreateForm({ people }: Props) {
     }
 
     setPending(true);
-    const result = await createEmployee({
+    const result = await createEmployeeAction({
       fullName: fullName.trim(),
       email: email.trim(),
       managerId: managerId || null,
@@ -56,12 +56,21 @@ export function EmployeeCreateForm({ people }: Props) {
     });
     setPending(false);
 
-    if ("error" in result) {
-      setErrors([result.error]);
+    if (!result.ok) {
+      setErrors([result.message]);
       return;
     }
 
-    setTempPassword(result.tempPassword);
+    // temporaryPassword is optional on the result type, so a missing value is
+    // surfaced rather than rendered as an empty credential box.
+    if (!result.temporaryPassword) {
+      setErrors([
+        "The account was created, but no temporary password came back. Reset it from Supabase before handing the account over.",
+      ]);
+      return;
+    }
+
+    setTempPassword(result.temporaryPassword);
     setFullName("");
     setEmail("");
     setManagerId("");

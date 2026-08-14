@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import { ShieldCheck } from "@phosphor-icons/react/dist/csr/ShieldCheck";
 import { WarningCircle } from "@phosphor-icons/react/dist/csr/WarningCircle";
 import { CheckCircle } from "@phosphor-icons/react/dist/csr/CheckCircle";
-import { createClient } from "@/lib/supabase/client";
-import { ADMIN_BLOCKED_MESSAGE, adminErrorMessage, validateScopeGrant } from "@/lib/admin";
+import { grantMatrixScopesAction } from "@/app/admin/actions";
+import { validateScopeGrant } from "@/lib/admin";
 import type { AdminPlanSummary, ProfileWithManager, ScopeTarget } from "@/lib/admin-queries";
 
 type Props = {
@@ -25,11 +25,15 @@ type Props = {
  *   1. review_participant must hold a 'matrix_manager' row for that (plan,
  *      person) pair. enforce_scope_participant_is_matrix rejects a scope hung
  *      off any other role with 23514, so the participant row has to exist
- *      first. That step happens automatically here rather than as a separate
- *      screen, because "add participant, then grant scope" is one intent split
- *      across two records, not two decisions.
+ *      first. That step happens automatically as part of granting a scope,
+ *      because "add participant, then grant scope" is one intent split across
+ *      two records, not two decisions.
  *
  *   2. Only then can review_participant_scope rows be inserted.
+ *
+ * Both steps run inside grantMatrixScopesAction on the server, which
+ * re-verifies auth, password expiry and HR status per call and revalidates the
+ * admin pages afterwards. This component only collects the selection.
  *
  * The scope targets offered are always drawn from the selected plan, so a
  * category or objective belonging to someone else can't be picked. The
@@ -79,84 +83,26 @@ export function ScopeGrantForm({ plans, people, targetsByPlanId }: Props) {
     }
 
     setPending(true);
-    const supabase = createClient();
 
-    // Step 1: find or create the matrix_manager participant row. The unique
-    // constraint is on (plan, participant, role), so an existing row is reused
-    // rather than duplicated — someone may already be a matrix manager here
-    // with a different set of scopes.
-    const { data: existing } = await supabase
-      .from("review_participant")
-      .select("id")
-      .eq("employee_goal_plan_id", planId)
-      .eq("participant_id", participantId)
-      .eq("role", "matrix_manager")
-      .maybeSingle();
-
-    let reviewParticipantId = (existing as { id: string } | null)?.id ?? null;
-
-    if (!reviewParticipantId) {
-      const { data: created, error: participantError } = await supabase
-        .from("review_participant")
-        .insert({
-          employee_goal_plan_id: planId,
-          participant_id: participantId,
-          role: "matrix_manager",
-        })
-        .select("id")
-        .maybeSingle();
-
-      if (participantError) {
-        setErrors([
-          adminErrorMessage(participantError) ??
-            "Couldn't add them as a matrix manager on this plan.",
-        ]);
-        setPending(false);
-        return;
-      }
-      if (!created) {
-        setErrors([ADMIN_BLOCKED_MESSAGE]);
-        setPending(false);
-        return;
-      }
-      reviewParticipantId = (created as { id: string }).id;
-    }
-
-    // Step 2: the scopes themselves. Sent as one insert so a partial grant
-    // isn't left behind when one row trips a constraint.
-    const rows = [
-      ...categoryIds.map((id) => ({
-        review_participant_id: reviewParticipantId,
-        scope_type: "kra_category",
-        scope_id: id,
-      })),
-      ...objectiveIds.map((id) => ({
-        review_participant_id: reviewParticipantId,
-        scope_type: "objective",
-        scope_id: id,
-      })),
+    const scopes = [
+      ...categoryIds.map((id) => ({ scopeType: "kra_category" as const, scopeId: id })),
+      ...objectiveIds.map((id) => ({ scopeType: "objective" as const, scopeId: id })),
     ];
 
-    const { data: inserted, error: scopeError } = await supabase
-      .from("review_participant_scope")
-      .insert(rows)
-      .select("id");
+    const result = await grantMatrixScopesAction({
+      employeeGoalPlanId: planId,
+      participantId,
+      scopes,
+    });
 
-    if (scopeError) {
-      setErrors([adminErrorMessage(scopeError) ?? "Couldn't grant those scopes."]);
-      setPending(false);
-      return;
-    }
-    if (!inserted || inserted.length === 0) {
-      setErrors([ADMIN_BLOCKED_MESSAGE]);
+    if (!result.ok) {
+      setErrors([result.message]);
       setPending(false);
       return;
     }
 
     setPending(false);
-    setNotice(
-      `Granted ${inserted.length} scope${inserted.length === 1 ? "" : "s"} on ${plan?.employee_name ?? "that plan"}.`,
-    );
+    setNotice(result.message);
     resetSelection();
     router.refresh();
   }

@@ -4,8 +4,8 @@ import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { PencilSimple } from "@phosphor-icons/react/dist/csr/PencilSimple";
 import { WarningCircle } from "@phosphor-icons/react/dist/csr/WarningCircle";
-import { createClient } from "@/lib/supabase/client";
-import { ADMIN_BLOCKED_MESSAGE, adminErrorMessage, validateEmployeeEdit } from "@/lib/admin";
+import { updateEmployeeAction } from "@/app/admin/actions";
+import { validateEmployeeEdit } from "@/lib/admin";
 import type { ProfileWithManager } from "@/lib/admin-queries";
 
 type Props = {
@@ -16,16 +16,17 @@ type Props = {
 /**
  * Edit an existing profile's name, line manager and HR flag.
  *
- * Unlike creation, this writes through the ordinary browser client, the same
- * way every other form in this app does. Nothing here touches auth.users, so
- * nothing here needs the service-role key: profiles_hr_all already gives an HR
- * admin UPDATE authority on any profile row, and RLS remains the authority on
- * whether the write lands.
+ * Goes through the same Server Action as creation rather than writing from the
+ * browser. RLS would permit the direct write (profiles_hr_all covers it), but
+ * routing it through the action keeps ONE authorization path — the action
+ * re-verifies auth, password expiry and HR status on every call — and lets the
+ * server revalidate the cached admin pages, which a browser-side write cannot
+ * do.
  *
- * Email is deliberately not editable. The profiles row and the auth.users
- * identity carry the address independently, so changing it here would move one
- * without the other and leave the person unable to sign in with what the
- * directory says their address is.
+ * Email is passed through unchanged. The action requires the field, but this
+ * form does not offer it for editing: the profiles row and the auth.users
+ * identity carry the address independently, so changing one without the other
+ * would leave the person unable to sign in with what the directory shows.
  */
 export function EmployeeEditForm({ person, people }: Props) {
   const router = useRouter();
@@ -52,27 +53,18 @@ export function EmployeeEditForm({ person, people }: Props) {
     }
 
     setPending(true);
-    const supabase = createClient();
-    const { data, error } = await supabase
-      .from("profiles")
-      .update({
-        full_name: fullName.trim(),
-        manager_id: managerId || null,
-        is_hr_admin: isHrAdmin,
-      })
-      .eq("id", person.id)
-      .select("id")
-      .maybeSingle();
+    const result = await updateEmployeeAction({
+      profileId: person.id,
+      fullName: fullName.trim(),
+      // Unchanged: this form does not edit the address, but the action's
+      // contract requires it.
+      email: person.email,
+      managerId: managerId || null,
+      isHrAdmin,
+    });
 
-    if (error) {
-      setErrors([adminErrorMessage(error) ?? "Couldn't save those changes."]);
-      setPending(false);
-      return;
-    }
-    // An RLS-refused UPDATE is silent: no error, no rows. Without this branch
-    // the form would clear and claim success on a write that never happened.
-    if (!data) {
-      setErrors([ADMIN_BLOCKED_MESSAGE]);
+    if (!result.ok) {
+      setErrors([result.message]);
       setPending(false);
       return;
     }

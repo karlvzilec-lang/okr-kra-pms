@@ -162,7 +162,10 @@ export function GoalLinkForm({
     // together or not at all. The RPC is SECURITY INVOKER, so it runs under
     // this employee's own RLS and grants nothing the two separate inserts
     // wouldn't have — what it adds is atomicity, not authority.
-    const { data, error } = await supabase.rpc("cascade_goal_to_own_plan", {
+    //
+    // It returns a set of {goal_id, goal_cascade_id} rather than a bare id, so
+    // an empty result set is a real failure mode and is treated as one.
+    const { data, error } = await supabase.rpc("create_cascaded_goal", {
       p_source_goal_id: sourceGoalId,
       p_target_kra_category_id: targetCategoryId,
       p_weight: hundredthsToNumber(weightHundredths!),
@@ -173,7 +176,9 @@ export function GoalLinkForm({
       setPending(false);
       return;
     }
-    if (!data) {
+
+    const created = (data as { goal_id: string; goal_cascade_id: string }[] | null)?.[0];
+    if (!created) {
       setErrors([ADMIN_BLOCKED_MESSAGE]);
       setPending(false);
       return;

@@ -1,38 +1,41 @@
 // ============================================================================
-// PLACEHOLDER — DELETE AND REPLACE WITH SOL'S REAL FILE AT MERGE.
+// PLACEHOLDER — DELETE AT MERGE. Sol's real implementation supersedes this.
 // ============================================================================
 //
-// web/app/admin/actions.ts belongs to Sol this round: it owns the service-role
-// boundary, the auth + HR re-verification, the Auth Admin API call and the
-// compensating delete. None of that is implemented here and none of it should
-// be added here.
+// web/app/admin/actions.ts belongs to Sol this round: the service-role
+// boundary, the auth + password-expiry + HR re-verification, the Auth Admin
+// API call, the compensating delete, and revalidatePath() all live there. None
+// of that is implemented here and none of it should be added here.
 //
-// This file exists only because a TypeScript ambient declaration does not
-// satisfy the bundler — Turbopack resolves the import for real, so the UI half
-// cannot build against a module that has no file at all. The alternative,
-// pointing the form at some other placeholder path, would be worse: it would
-// leave a working-looking import that has to be rewritten at merge, and a
-// silent no-op is a far more dangerous thing to ship than a loud failure.
+// This file exists only because Turbopack resolves the import for real, so a
+// TypeScript ambient declaration is not enough to build against. Every function
+// throws: if one ever runs, the merge was incomplete, and a loud failure is far
+// safer than telling an HR admin an account was created that wasn't.
 //
-// So this throws. If it ever runs, the merge was incomplete, and the person
-// clicking the button finds out immediately rather than being told an account
-// was created that wasn't.
+// The signatures below are NOT guesses. They were read off Sol's landed
+// sol-admin-ui branch (commit 432d3dd) and verified by merging both halves in a
+// scratch worktree and building — which is also how the original placeholder
+// names were caught as wrong:
 //
-// Contract this placeholder pins down (agreed with Sol before either half was
-// written — the signature the form calls by):
+//   createEmployee(...)      ->  createEmployeeAction(...)
+//   {tempPassword}|{error}   ->  {ok, message, temporaryPassword?}
 //
-//   createEmployee(input: {
-//     fullName: string;
-//     email: string;
-//     managerId: string | null;
-//     isHrAdmin: boolean;
-//   }): Promise<{ tempPassword: string } | { error: string }>
-//
-// Note the return shape carries failure as data rather than as a thrown error:
-// a Server Action that throws surfaces as an opaque digest in production, so
-// the mapped, readable message has to travel back as a value.
+// Sol additionally ships app/admin/actions.contract.ts, a compile-time lock
+// that fails `next build` if these shapes drift again. That file is the
+// authority; this placeholder simply agrees with it.
 
 "use server";
+
+export type AdminActionResult =
+  | {
+      ok: true;
+      message: string;
+      temporaryPassword?: string;
+    }
+  | {
+      ok: false;
+      message: string;
+    };
 
 export type CreateEmployeeInput = {
   fullName: string;
@@ -41,14 +44,44 @@ export type CreateEmployeeInput = {
   isHrAdmin: boolean;
 };
 
-export type CreateEmployeeResult = { tempPassword: string } | { error: string };
+export type UpdateEmployeeInput = {
+  profileId: string;
+  fullName: string;
+  email: string;
+  managerId: string | null;
+  isHrAdmin: boolean;
+};
 
-export async function createEmployee(
-  input: CreateEmployeeInput,
-): Promise<CreateEmployeeResult> {
+export type MatrixScopeGrantInput = {
+  employeeGoalPlanId: string;
+  participantId: string;
+  scopes: Array<{
+    scopeType: "kra_category" | "objective";
+    scopeId: string;
+  }>;
+};
+
+function notMerged(what: string): never {
   throw new Error(
-    `app/admin/actions.ts is still the placeholder from the UI half of this round, so ` +
-      `no account was created for ${input.email}. Employee provisioning is not wired up ` +
-      `until the service-role implementation is merged.`,
+    `app/admin/actions.ts is still the UI-half placeholder, so ${what} did not happen. ` +
+      "Replace this file with the implementation from sol-admin-ui before using employee administration.",
   );
+}
+
+export async function createEmployeeAction(
+  input: CreateEmployeeInput,
+): Promise<AdminActionResult> {
+  notMerged(`account creation for ${input.email}`);
+}
+
+export async function updateEmployeeAction(
+  input: UpdateEmployeeInput,
+): Promise<AdminActionResult> {
+  notMerged(`the profile update for ${input.profileId}`);
+}
+
+export async function grantMatrixScopesAction(
+  input: MatrixScopeGrantInput,
+): Promise<AdminActionResult> {
+  notMerged(`the matrix-scope grant on plan ${input.employeeGoalPlanId}`);
 }
