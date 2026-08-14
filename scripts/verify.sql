@@ -2759,4 +2759,822 @@ begin
 end $$;
 rollback;
 
-\echo 'ALL 72 CHECKS PASSED'
+-- ============================================================================
+-- Admin UI Gate 1 (1): HR provisions a profile through real RLS and the
+-- password timestamp stays null, which activates first-login rotation.
+-- ============================================================================
+begin;
+insert into auth.users (
+  id, instance_id, aud, role, email, encrypted_password,
+  email_confirmed_at, created_at, updated_at,
+  confirmation_token, recovery_token, email_change,
+  email_change_token_new, email_change_token_current,
+  phone_change, phone_change_token
+)
+values (
+  'a1400000-0000-4000-8000-000000000001',
+  '00000000-0000-0000-0000-000000000000',
+  'authenticated', 'authenticated', 'gate1.employee@example.com',
+  crypt('TempPassword!1', gen_salt('bf')), now(), now(), now(),
+  '', '', '', '', '', '', ''
+);
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_password_changed_at timestamptz;
+begin
+  insert into public.profiles (
+    id, full_name, email, manager_id, is_hr_admin
+  )
+  values (
+    'a1400000-0000-4000-8000-000000000001',
+    'Gate One Employee',
+    'gate1.employee@example.com',
+    '11111111-1111-4111-8111-000000000002',
+    false
+  )
+  returning password_changed_at into v_password_changed_at;
+
+  if v_password_changed_at is not null then
+    raise exception 'Expected password_changed_at to remain null, got %',
+      v_password_changed_at;
+  end if;
+
+  raise notice 'PASS: HR profile insert succeeds with password_changed_at null';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (2): a non-HR profile INSERT is an RLS exception (42501),
+-- not a silent zero-row result.
+-- ============================================================================
+begin;
+insert into auth.users (
+  id, instance_id, aud, role, email, encrypted_password,
+  email_confirmed_at, created_at, updated_at,
+  confirmation_token, recovery_token, email_change,
+  email_change_token_new, email_change_token_current,
+  phone_change, phone_change_token
+)
+values (
+  'a1400000-0000-4000-8000-000000000002',
+  '00000000-0000-0000-0000-000000000000',
+  'authenticated', 'authenticated', 'gate1.denied@example.com',
+  crypt('TempPassword!1', gen_salt('bf')), now(), now(), now(),
+  '', '', '', '', '', '', ''
+);
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    insert into public.profiles (id, full_name, email, is_hr_admin)
+    values (
+      'a1400000-0000-4000-8000-000000000002',
+      'Denied Profile',
+      'gate1.denied@example.com',
+      false
+    );
+    raise exception 'ASSERTION FAILED: non-HR profile insert should be denied';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: non-HR profile insert raises 42501';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (3): the manager self-reference check remains 23514.
+-- ============================================================================
+begin;
+insert into auth.users (
+  id, instance_id, aud, role, email, encrypted_password,
+  email_confirmed_at, created_at, updated_at,
+  confirmation_token, recovery_token, email_change,
+  email_change_token_new, email_change_token_current,
+  phone_change, phone_change_token
+)
+values (
+  'a1400000-0000-4000-8000-000000000003',
+  '00000000-0000-0000-0000-000000000000',
+  'authenticated', 'authenticated', 'gate1.self-manager@example.com',
+  crypt('TempPassword!1', gen_salt('bf')), now(), now(), now(),
+  '', '', '', '', '', '', ''
+);
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+begin
+  begin
+    insert into public.profiles (id, full_name, email, manager_id)
+    values (
+      'a1400000-0000-4000-8000-000000000003',
+      'Self Manager',
+      'gate1.self-manager@example.com',
+      'a1400000-0000-4000-8000-000000000003'
+    );
+    raise exception 'ASSERTION FAILED: a profile must not manage itself';
+  exception
+    when sqlstate '23514' then
+      null;
+  end;
+
+  raise notice 'PASS: self-referencing manager_id raises 23514';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (4): profile email uniqueness remains 23505.
+-- ============================================================================
+begin;
+insert into auth.users (
+  id, instance_id, aud, role, email, encrypted_password,
+  email_confirmed_at, created_at, updated_at,
+  confirmation_token, recovery_token, email_change,
+  email_change_token_new, email_change_token_current,
+  phone_change, phone_change_token
+)
+values (
+  'a1400000-0000-4000-8000-000000000004',
+  '00000000-0000-0000-0000-000000000000',
+  'authenticated', 'authenticated', 'gate1.auth-only@example.com',
+  crypt('TempPassword!1', gen_salt('bf')), now(), now(), now(),
+  '', '', '', '', '', '', ''
+);
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+begin
+  begin
+    insert into public.profiles (id, full_name, email)
+    values (
+      'a1400000-0000-4000-8000-000000000004',
+      'Duplicate Email',
+      'dara.sok@example.com'
+    );
+    raise exception 'ASSERTION FAILED: duplicate profile email should fail';
+  exception
+    when sqlstate '23505' then
+      null;
+  end;
+
+  raise notice 'PASS: duplicate profile email raises 23505';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (5): employee cascade creates the goal and link atomically,
+-- copies source structure, applies the editable weight, and clears ratings.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000005', true);
+do $$
+declare
+  v_default_goal_id uuid;
+  v_default_cascade_id uuid;
+  v_goal_id uuid;
+  v_cascade_id uuid;
+  v_matches integer;
+begin
+  select result.goal_id, result.goal_cascade_id
+  into v_default_goal_id, v_default_cascade_id
+  from public.create_cascaded_goal(
+    '55555555-5555-4555-8555-000000000006',
+    '44444444-4444-4444-8444-00000000000d',
+    null
+  ) as result;
+
+  select result.goal_id, result.goal_cascade_id
+  into v_goal_id, v_cascade_id
+  from public.create_cascaded_goal(
+    '55555555-5555-4555-8555-000000000006',
+    '44444444-4444-4444-8444-00000000000d',
+    37.50
+  ) as result;
+
+  select count(*)
+  into v_matches
+  from public.goal as cascaded
+  join public.goal as source
+    on source.id = '55555555-5555-4555-8555-000000000006'
+  join public.goal_cascade as link
+    on link.id = v_cascade_id
+   and link.source_goal_id = source.id
+   and link.cascaded_goal_id = cascaded.id
+  join public.kra_category as category
+    on category.id = cascaded.kra_category_id
+  join public.employee_goal_plan as plan
+    on plan.id = category.employee_goal_plan_id
+  where cascaded.id = v_goal_id
+    and cascaded.kra_category_id = '44444444-4444-4444-8444-00000000000d'
+    and cascaded.title is not distinct from source.title
+    and cascaded.description is not distinct from source.description
+    and cascaded.target_metric is not distinct from source.target_metric
+    and cascaded.rating_scale_max is not distinct from source.rating_scale_max
+    and cascaded.weight = 37.50
+    and cascaded.self_rating is null
+    and cascaded.self_comment is null
+    and cascaded.manager_rating is null
+    and cascaded.manager_comment is null
+    and link.cascaded_by = '11111111-1111-4111-8111-000000000005'
+    and plan.employee_id = '11111111-1111-4111-8111-000000000005';
+
+  if v_matches <> 1 then
+    raise exception 'Expected one correctly copied employee cascade, got %', v_matches;
+  end if;
+
+  if not exists (
+    select 1
+    from public.goal as cascaded
+    join public.goal as source
+      on source.id = '55555555-5555-4555-8555-000000000006'
+    join public.goal_cascade as link
+      on link.id = v_default_cascade_id
+     and link.cascaded_goal_id = cascaded.id
+     and link.source_goal_id = source.id
+    where cascaded.id = v_default_goal_id
+      and cascaded.weight = source.weight
+  ) then
+    raise exception 'Null p_weight did not prefill the source weight';
+  end if;
+
+  raise notice 'PASS: create_cascaded_goal prefills or overrides weight on pristine copies';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (6): an unreadable source is denied without leaking it.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000005', true);
+do $$
+begin
+  begin
+    perform public.create_cascaded_goal(
+      '55555555-5555-4555-8555-000000000001',
+      '44444444-4444-4444-8444-00000000000d',
+      null
+    );
+    raise exception 'ASSERTION FAILED: unreadable cascade source should fail';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: create_cascaded_goal rejects an unreadable source';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (7): actor spoofing is structurally absent from the RPC;
+-- an attempted actor-bearing overload is undefined (42883).
+-- ============================================================================
+do $$
+declare
+  v_arg_names text[];
+begin
+  select p.proargnames
+  into v_arg_names
+  from pg_proc as p
+  where p.oid = 'public.create_cascaded_goal(uuid,uuid,numeric)'::regprocedure;
+
+  if 'p_cascaded_by' = any (coalesce(v_arg_names, array[]::text[]))
+    or 'p_actor_id' = any (coalesce(v_arg_names, array[]::text[]))
+  then
+    raise exception 'Cascade RPC must derive its actor from auth.uid(), got args %',
+      v_arg_names;
+  end if;
+
+  begin
+    perform public.create_cascaded_goal(
+      '55555555-5555-4555-8555-000000000006',
+      '44444444-4444-4444-8444-00000000000d',
+      50,
+      '11111111-1111-4111-8111-000000000006'
+    );
+    raise exception 'ASSERTION FAILED: actor-bearing cascade overload should not exist';
+  exception
+    when sqlstate '42883' then
+      null;
+  end;
+
+  raise notice 'PASS: cascade actor spoofing is structurally impossible';
+end $$;
+
+-- ============================================================================
+-- Admin UI Gate 1 (8): no target-plan argument exists, and choosing a category
+-- outside the caller's own plan is rejected by the goal INSERT RLS policy.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000005', true);
+do $$
+declare
+  v_arg_names text[];
+begin
+  select p.proargnames
+  into v_arg_names
+  from pg_proc as p
+  where p.oid = 'public.create_cascaded_goal(uuid,uuid,numeric)'::regprocedure;
+
+  if 'p_target_plan_id' = any (coalesce(v_arg_names, array[]::text[]))
+    or 'p_employee_goal_plan_id' = any (coalesce(v_arg_names, array[]::text[]))
+  then
+    raise exception 'Cascade RPC must derive the plan from its category, got args %',
+      v_arg_names;
+  end if;
+
+  begin
+    perform public.create_cascaded_goal(
+      '55555555-5555-4555-8555-000000000006',
+      '44444444-4444-4444-8444-00000000000e',
+      50
+    );
+    raise exception 'ASSERTION FAILED: foreign target category should be denied';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+end $$;
+reset role;
+do $$
+begin
+  if exists (
+    select 1
+    from public.goal
+    where kra_category_id = '44444444-4444-4444-8444-00000000000e'
+      and title = 'Team ships payments platform v2'
+  ) then
+    raise exception 'Foreign-plan cascade left a goal behind';
+  end if;
+
+  raise notice 'PASS: cascade target plan is structurally derived and caller-owned';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (9): cascaded_goal_id stays unique (23505).
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000005', true);
+do $$
+declare
+  v_goal_id uuid;
+begin
+  select result.goal_id
+  into v_goal_id
+  from public.create_cascaded_goal(
+    '55555555-5555-4555-8555-000000000006',
+    '44444444-4444-4444-8444-00000000000d',
+    50
+  ) as result;
+
+  begin
+    insert into public.goal_cascade (
+      source_goal_id, cascaded_goal_id, cascaded_by
+    )
+    values (
+      '55555555-5555-4555-8555-000000000006',
+      v_goal_id,
+      '11111111-1111-4111-8111-000000000005'
+    );
+    raise exception 'ASSERTION FAILED: a goal cannot be cascaded twice';
+  exception
+    when sqlstate '23505' then
+      null;
+  end;
+
+  raise notice 'PASS: second link to a cascaded goal raises 23505';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (10): a failed RPC call leaves neither a goal nor a link.
+-- ============================================================================
+begin;
+create temporary table admin_gate_atomic_counts (
+  goal_count bigint not null,
+  cascade_count bigint not null
+) on commit drop;
+insert into admin_gate_atomic_counts
+select
+  (select count(*) from public.goal),
+  (select count(*) from public.goal_cascade);
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000005', true);
+do $$
+begin
+  begin
+    perform public.create_cascaded_goal(
+      '55555555-5555-4555-8555-000000000006',
+      'a1400000-0000-4000-8000-000000000010',
+      50
+    );
+    raise exception 'ASSERTION FAILED: invalid category cascade should fail';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+end $$;
+reset role;
+do $$
+declare
+  v_goal_before bigint;
+  v_cascade_before bigint;
+  v_goal_after bigint;
+  v_cascade_after bigint;
+begin
+  select goal_count, cascade_count
+  into v_goal_before, v_cascade_before
+  from admin_gate_atomic_counts;
+
+  select count(*) into v_goal_after from public.goal;
+  select count(*) into v_cascade_after from public.goal_cascade;
+
+  if v_goal_after <> v_goal_before or v_cascade_after <> v_cascade_before then
+    raise exception 'Failed cascade changed goal/link counts from %/% to %/%',
+      v_goal_before, v_cascade_before, v_goal_after, v_cascade_after;
+  end if;
+
+  raise notice 'PASS: failed cascade RPC leaves no partial rows';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (11): goal alignment rejects an unreadable parent.
+-- ============================================================================
+begin;
+delete from public.goal_alignment
+where child_goal_id = '55555555-5555-4555-8555-000000000008';
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    insert into public.goal_alignment (
+      parent_goal_id, child_goal_id, created_by
+    )
+    values (
+      '55555555-5555-4555-8555-000000000001',
+      '55555555-5555-4555-8555-000000000008',
+      '11111111-1111-4111-8111-000000000006'
+    );
+    raise exception 'ASSERTION FAILED: unreadable goal alignment parent should fail';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: goal alignment rejects an unreadable parent';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (12): goal alignment rejects created_by spoofing.
+-- ============================================================================
+begin;
+delete from public.goal_alignment
+where child_goal_id = '55555555-5555-4555-8555-000000000008';
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    insert into public.goal_alignment (
+      parent_goal_id, child_goal_id, created_by
+    )
+    values (
+      '55555555-5555-4555-8555-000000000006',
+      '55555555-5555-4555-8555-000000000008',
+      '11111111-1111-4111-8111-000000000005'
+    );
+    raise exception 'ASSERTION FAILED: spoofed goal alignment actor should fail';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: goal alignment rejects a spoofed created_by';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (13a): objective alignment rejects an unreadable parent.
+-- ============================================================================
+begin;
+delete from public.objective_alignment
+where child_objective_id = 'bbbbbbbb-bbbb-4bbb-8bbb-000000000001';
+insert into public.objective (
+  id, review_cycle_id, owner_id, title, description
+)
+values (
+  'a1400000-0000-4000-8000-000000000013',
+  '22222222-2222-4222-8222-000000000001',
+  '11111111-1111-4111-8111-000000000003',
+  'Unreadable parent objective',
+  'Owned by Ben, who is not Dara''s manager.'
+);
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+begin
+  begin
+    insert into public.objective_alignment (
+      parent_objective_id, child_objective_id, created_by
+    )
+    values (
+      'a1400000-0000-4000-8000-000000000013',
+      'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+      '11111111-1111-4111-8111-000000000004'
+    );
+    raise exception 'ASSERTION FAILED: unreadable objective parent should fail';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: objective alignment rejects an unreadable parent';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (13b): objective alignment rejects created_by spoofing.
+-- ============================================================================
+begin;
+delete from public.objective_alignment
+where child_objective_id = 'bbbbbbbb-bbbb-4bbb-8bbb-000000000001';
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+begin
+  begin
+    insert into public.objective_alignment (
+      parent_objective_id, child_objective_id, created_by
+    )
+    values (
+      'bbbbbbbb-bbbb-4bbb-8bbb-000000000002',
+      'bbbbbbbb-bbbb-4bbb-8bbb-000000000001',
+      '11111111-1111-4111-8111-000000000005'
+    );
+    raise exception 'ASSERTION FAILED: spoofed objective alignment actor should fail';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: objective alignment rejects a spoofed created_by';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (14): HR inserts review_participant through real RLS.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_id uuid;
+begin
+  insert into public.review_participant (
+    employee_goal_plan_id, participant_id, role
+  )
+  values (
+    '33333333-3333-4333-8333-00000000000c',
+    '11111111-1111-4111-8111-000000000009',
+    'matrix_manager'
+  )
+  returning id into v_id;
+
+  if v_id is null then
+    raise exception 'HR review_participant insert returned no id';
+  end if;
+
+  raise notice 'PASS: HR inserts review_participant through RLS';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (15): non-HR review_participant INSERT raises 42501.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000006', true);
+do $$
+begin
+  begin
+    insert into public.review_participant (
+      employee_goal_plan_id, participant_id, role
+    )
+    values (
+      '33333333-3333-4333-8333-00000000000d',
+      '11111111-1111-4111-8111-000000000009',
+      'matrix_manager'
+    );
+    raise exception 'ASSERTION FAILED: non-HR participant insert should fail';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: non-HR review_participant insert raises 42501';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (16): HR grants a kra_category scope through real RLS.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_id uuid;
+begin
+  insert into public.review_participant_scope (
+    review_participant_id, scope_type, scope_id
+  )
+  values (
+    '88888888-8888-4888-8888-000000000001',
+    'kra_category',
+    '44444444-4444-4444-8444-00000000000a'
+  )
+  returning id into v_id;
+
+  if v_id is null then
+    raise exception 'HR kra_category scope insert returned no id';
+  end if;
+
+  raise notice 'PASS: HR grants a kra_category scope through RLS';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (17): HR grants the objective polymorphic scope branch.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_id uuid;
+begin
+  insert into public.review_participant_scope (
+    review_participant_id, scope_type, scope_id
+  )
+  values (
+    '88888888-8888-4888-8888-000000000001',
+    'objective',
+    'bbbbbbbb-bbbb-4bbb-8bbb-000000000001'
+  )
+  returning id into v_id;
+
+  if v_id is null then
+    raise exception 'HR objective scope insert returned no id';
+  end if;
+
+  raise notice 'PASS: HR grants an objective scope through RLS';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (18): non-HR scope INSERT raises 42501.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000009', true);
+do $$
+begin
+  begin
+    insert into public.review_participant_scope (
+      review_participant_id, scope_type, scope_id
+    )
+    values (
+      '88888888-8888-4888-8888-000000000001',
+      'kra_category',
+      '44444444-4444-4444-8444-00000000000a'
+    );
+    raise exception 'ASSERTION FAILED: non-HR scope insert should fail';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: non-HR review_participant_scope insert raises 42501';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (19): a line-manager participant cannot receive a scope.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+begin
+  begin
+    insert into public.review_participant_scope (
+      review_participant_id, scope_type, scope_id
+    )
+    select
+      rp.id,
+      'kra_category'::public.scope_type,
+      '44444444-4444-4444-8444-00000000000a'::uuid
+    from public.review_participant as rp
+    where rp.employee_goal_plan_id = '33333333-3333-4333-8333-00000000000a'
+      and rp.participant_id = '11111111-1111-4111-8111-000000000002'
+      and rp.role = 'line_manager';
+    raise exception 'ASSERTION FAILED: line-manager scope should fail';
+  exception
+    when sqlstate '23514' then
+      null;
+  end;
+
+  raise notice 'PASS: line-manager participant scope raises 23514';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (20): a nonexistent polymorphic category raises 23503.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+begin
+  begin
+    insert into public.review_participant_scope (
+      review_participant_id, scope_type, scope_id
+    )
+    values (
+      '88888888-8888-4888-8888-000000000001',
+      'kra_category',
+      'a1400000-0000-4000-8000-000000000020'
+    );
+    raise exception 'ASSERTION FAILED: nonexistent scope target should fail';
+  exception
+    when sqlstate '23503' then
+      null;
+  end;
+
+  raise notice 'PASS: nonexistent category scope raises 23503';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (21): duplicate scope grants remain 23505.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+begin
+  begin
+    insert into public.review_participant_scope (
+      review_participant_id, scope_type, scope_id
+    )
+    values (
+      '88888888-8888-4888-8888-000000000001',
+      'kra_category',
+      '44444444-4444-4444-8444-00000000000b'
+    );
+    raise exception 'ASSERTION FAILED: duplicate scope should fail';
+  exception
+    when sqlstate '23505' then
+      null;
+  end;
+
+  raise notice 'PASS: duplicate scope grant raises 23505';
+end $$;
+rollback;
+
+-- ============================================================================
+-- Admin UI Gate 1 (22): non-HR goal_cascade UPDATE is a zero-row RLS no-op.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000005', true);
+do $$
+declare
+  v_rows integer;
+begin
+  update public.goal_cascade
+  set cascaded_at = cascaded_at + interval '1 second'
+  where id = '66666666-6666-4666-8666-000000000001';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 0 then
+    raise exception 'Expected non-HR cascade UPDATE to affect 0 rows, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: non-HR goal_cascade UPDATE is a silent zero-row no-op';
+end $$;
+rollback;
+
+\echo 'ALL 95 CHECKS PASSED'
