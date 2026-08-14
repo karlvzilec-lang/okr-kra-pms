@@ -144,3 +144,92 @@ export type ReviewSummary = {
   kra_ratings: KraRating[];
   objectives: Objective[];
 };
+
+// ---------------------------------------------------------------------------
+// HR administration / cascade + alignment links (additive - every type above
+// is what /review, /goals, /objectives, /calibration and /review-cycles
+// already depend on and is left untouched).
+// ---------------------------------------------------------------------------
+
+/**
+ * A person's row in public.profiles.
+ *
+ * password_changed_at is nullable and a null is NOT "unknown": it is the
+ * signal that the account has never rotated the password it was provisioned
+ * with, which is exactly what isPasswordExpired() treats as expired and what
+ * forces the change-password redirect on first login. HR provisioning
+ * deliberately leaves it null rather than stamping now().
+ */
+export type Profile = {
+  id: string;
+  full_name: string;
+  email: string;
+  manager_id: string | null;
+  is_hr_admin: boolean;
+  password_changed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * A top-down copy event: source_goal_id was copied into cascaded_goal_id.
+ *
+ * cascaded_goal_id is UNIQUE - a goal can be the result of at most one
+ * cascade, so this link is one-shot and never re-pointed. UPDATE and DELETE on
+ * this table are HR-only, which is why the UI renders an existing link as
+ * read-only state rather than offering an unlink control.
+ */
+export type GoalCascade = {
+  id: string;
+  source_goal_id: string;
+  cascaded_goal_id: string;
+  cascaded_by: string;
+  cascaded_at: string;
+};
+
+/**
+ * A bottom-up link between two independently pre-existing goals.
+ * child_goal_id is UNIQUE - a goal may align upward to only one parent.
+ */
+export type GoalAlignment = {
+  id: string;
+  parent_goal_id: string;
+  child_goal_id: string;
+  created_by: string;
+  created_at: string;
+};
+
+/** Mirrors GoalAlignment for objectives, including the child-side unique. */
+export type ObjectiveAlignment = {
+  id: string;
+  parent_objective_id: string;
+  child_objective_id: string;
+  created_by: string;
+  created_at: string;
+};
+
+export type ParticipantRole = "employee" | "line_manager" | "hr_admin" | "matrix_manager";
+
+export type ReviewParticipant = {
+  id: string;
+  employee_goal_plan_id: string;
+  participant_id: string;
+  role: ParticipantRole;
+  created_at: string;
+};
+
+export type ScopeType = "kra_category" | "objective";
+
+/**
+ * The row that makes matrix access scoped rather than blanket: a matrix
+ * manager may act only on the sections explicitly granted here. scope_id is
+ * polymorphic (kra_category.id or objective.id) and therefore carries no FK -
+ * the database validates its existence by trigger instead.
+ */
+export type ReviewParticipantScope = {
+  id: string;
+  review_participant_id: string;
+  scope_type: ScopeType;
+  scope_id: string;
+  created_at: string;
+};

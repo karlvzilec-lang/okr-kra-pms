@@ -5,8 +5,10 @@ import { ArrowLeft } from "@phosphor-icons/react/dist/ssr/ArrowLeft";
 import { createClient } from "@/lib/supabase/server";
 import { LogoutButton } from "@/components/logout-button";
 import { GoalPlanEditor } from "@/components/goals/goal-plan-editor";
+import { GoalLinkForm } from "@/components/goals/goal-link-form";
 import { isPasswordExpired } from "@/lib/password";
 import { loadGoalPlan } from "@/lib/goal-plan-queries";
+import { loadCascadeSources, loadGoalLinks, loadGoalTitles } from "@/lib/admin-queries";
 
 export default async function GoalPlanPage({ params }: PageProps<"/goals/[planId]">) {
   const { planId } = await params;
@@ -44,6 +46,23 @@ export default async function GoalPlanPage({ params }: PageProps<"/goals/[planId
   if (plan.employee_id !== user.id) {
     redirect(`/reports/${planId}`);
   }
+
+  // Cascade / alignment context. Sources are whatever can_read_goal exposes to
+  // this employee that isn't already in their own plan — in practice their line
+  // manager's goals, which is exactly the read authority the cascade RPC needs.
+  const ownGoalIds = plan.categories.flatMap((category) =>
+    category.goals.map((goal) => goal.id),
+  );
+  const [sources, links] = await Promise.all([
+    loadCascadeSources(supabase, plan.id),
+    loadGoalLinks(supabase, ownGoalIds),
+  ]);
+  const linkedTitleById = await loadGoalTitles(supabase, [
+    ...new Set([
+      ...links.cascadeSourceByGoalId.values(),
+      ...links.alignmentParentByGoalId.values(),
+    ]),
+  ]);
 
   return (
     <main className="flex flex-1 flex-col" style={{ backgroundColor: "var(--background)" }}>
@@ -90,6 +109,14 @@ export default async function GoalPlanPage({ params }: PageProps<"/goals/[planId
         </div>
 
         <GoalPlanEditor plan={plan} />
+
+        <GoalLinkForm
+          plan={plan}
+          sources={sources}
+          cascadeSourceByGoalId={links.cascadeSourceByGoalId}
+          alignmentParentByGoalId={links.alignmentParentByGoalId}
+          linkedTitleById={linkedTitleById}
+        />
       </div>
     </main>
   );
