@@ -4217,4 +4217,182 @@ begin
 end $$;
 rollback;
 
-\echo 'ALL 115 CHECKS PASSED'
+
+-- ============================================================================
+-- PAST REVIEW-CYCLE VISIBILITY — Dara's FY2025 history
+--
+-- Five assertions covering both halves of the guarantee: an employee can reach
+-- their own closed cycle and its real computed ratings, an unrelated employee
+-- can reach neither the cycle nor the summary, and HR's short-circuit branch
+-- of review_cycle_select_scoped still works.
+--
+-- The RLS check and the RPC check are pinned separately on purpose.
+-- employee_review_summary is `security invoker`, so it inherits the caller's
+-- RLS rather than enforcing anything itself — proving the table policy hides
+-- the row does not prove the function returns nothing, and vice versa. Both
+-- are asserted so neither can regress behind the other.
+-- ============================================================================
+
+-- 1. Dara sees his own past cycle.
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_status public.review_cycle_status;
+begin
+  select status into v_status
+  from public.review_cycle
+  where id = '22222222-2222-4222-8222-000000000002';
+
+  if v_status is null then
+    raise exception 'Expected Dara to see the FY2025 cycle, got no row';
+  end if;
+  if v_status <> 'closed'::public.review_cycle_status then
+    raise exception 'Expected the FY2025 cycle to be closed, got %', v_status;
+  end if;
+
+  raise notice 'PASS: an employee sees their own past (closed) review cycle';
+end $$;
+rollback;
+
+-- 2. Dara's FY2025 summary returns exactly one row carrying the plan's real
+--    computed ratings. The expected values are read back out of
+--    goal_plan_rating rather than hardcoded, so this cross-validates the
+--    summary against what compute_goal_plan_rating actually stored instead of
+--    asserting the same constant in two places.
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_rows int;
+  v_summary jsonb;
+  v_self numeric;
+  v_manager numeric;
+  v_stored_self numeric;
+  v_stored_manager numeric;
+begin
+  select count(*) into v_rows
+  from public.employee_review_summary(
+    '22222222-2222-4222-8222-000000000002',
+    '11111111-1111-4111-8111-000000000004'
+  );
+
+  if v_rows <> 1 then
+    raise exception 'Expected exactly 1 summary row for Dara''s FY2025 plan, got %', v_rows;
+  end if;
+
+  select summary into v_summary
+  from public.employee_review_summary(
+    '22222222-2222-4222-8222-000000000002',
+    '11111111-1111-4111-8111-000000000004'
+  );
+
+  select (r->>'overall_score')::numeric into v_self
+  from jsonb_array_elements(v_summary->'kra_ratings') as r
+  where r->>'rating_type' = 'self';
+
+  select (r->>'overall_score')::numeric into v_manager
+  from jsonb_array_elements(v_summary->'kra_ratings') as r
+  where r->>'rating_type' = 'manager';
+
+  select overall_score into v_stored_self
+  from public.goal_plan_rating
+  where employee_goal_plan_id = '33333333-3333-4333-8333-000000000010'
+    and rating_type = 'self'::public.rating_type;
+
+  select overall_score into v_stored_manager
+  from public.goal_plan_rating
+  where employee_goal_plan_id = '33333333-3333-4333-8333-000000000010'
+    and rating_type = 'manager'::public.rating_type;
+
+  if v_self is distinct from v_stored_self then
+    raise exception 'Summary self rating % does not match stored goal_plan_rating %',
+      v_self, v_stored_self;
+  end if;
+  if v_manager is distinct from v_stored_manager then
+    raise exception 'Summary manager rating % does not match stored goal_plan_rating %',
+      v_manager, v_stored_manager;
+  end if;
+
+  -- The seed's hand-computed expectations, pinned against the stored rows so a
+  -- silent change to the rollup or to the fixture's weights fails here.
+  if v_stored_self <> 4.400 then
+    raise exception 'Expected FY2025 self rollup 4.400, got %', v_stored_self;
+  end if;
+  if v_stored_manager <> 4.000 then
+    raise exception 'Expected FY2025 manager rollup 4.000, got %', v_stored_manager;
+  end if;
+
+  raise notice 'PASS: Dara''s FY2025 summary returns his real computed 4.400 / 4.000';
+end $$;
+rollback;
+
+-- 3. Sophea (Ben's report, no FY2025 participation) cannot see the cycle.
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000007', true);
+do $$
+declare
+  v_rows int;
+begin
+  select count(*) into v_rows
+  from public.review_cycle
+  where id = '22222222-2222-4222-8222-000000000002';
+
+  if v_rows <> 0 then
+    raise exception 'Expected Sophea to see 0 FY2025 cycle rows, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: an unrelated employee cannot see a cycle they never participated in';
+end $$;
+rollback;
+
+-- 4. The same caller gets zero rows out of the summary RPC. Separate from
+--    check 3: the function is security invoker, so this pins that it actually
+--    leans on that RLS rather than reaching past it.
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000007', true);
+do $$
+declare
+  v_rows int;
+begin
+  select count(*) into v_rows
+  from public.employee_review_summary(
+    '22222222-2222-4222-8222-000000000002',
+    '11111111-1111-4111-8111-000000000004'
+  );
+
+  if v_rows <> 0 then
+    raise exception 'Expected 0 FY2025 summary rows for an unrelated caller, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: employee_review_summary returns nothing for an unrelated caller on a past cycle';
+end $$;
+rollback;
+
+-- 5. HR still sees the past cycle through the is_hr_admin() short-circuit.
+--    Cheap, and it catches the case where a change narrowing the participant
+--    branch accidentally narrows the HR branch with it.
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows int;
+begin
+  select count(*) into v_rows
+  from public.review_cycle
+  where id = '22222222-2222-4222-8222-000000000002';
+
+  if v_rows <> 1 then
+    raise exception 'Expected HR to see the FY2025 cycle, got % rows', v_rows;
+  end if;
+
+  raise notice 'PASS: HR still sees the past cycle via the is_hr_admin short-circuit';
+end $$;
+rollback;
+
+\echo 'ALL 120 CHECKS PASSED'
