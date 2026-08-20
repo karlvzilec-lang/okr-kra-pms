@@ -3,7 +3,9 @@ import { ArrowLeft } from "@phosphor-icons/react/dist/ssr/ArrowLeft";
 import { createClient } from "@/lib/supabase/server";
 import { EmployeeCreateForm } from "@/components/admin/employee-create-form";
 import { EmployeeEditForm } from "@/components/admin/employee-edit-form";
-import { loadAllProfiles, requireHrAdmin } from "@/lib/admin-queries";
+import { Pagination } from "@/components/pagination";
+import { loadAllProfiles, loadProfilePage, requireHrAdmin } from "@/lib/admin-queries";
+import { parsePageParam } from "@/lib/pagination";
 
 /**
  * The employee directory: who exists, who reports to whom, who holds HR admin.
@@ -24,12 +26,29 @@ import { loadAllProfiles, requireHrAdmin } from "@/lib/admin-queries";
  * through profiles into goal plans and ratings, and a review history that
  * quietly loses its subject is worse than one that keeps a departed person in
  * it. Deactivation is out of scope this round rather than half-built.
+ *
+ * Two employee queries run here, not one, and the split is deliberate: the
+ * rendered directory is paginated, while `managerOptions` stays the complete
+ * list because it feeds the manager <select> in the create and edit forms. A
+ * picker offering only the 25 people on the current page would silently make
+ * valid managers unassignable, which is a data-entry bug rather than a display
+ * one.
  */
-export default async function AdminEmployeesPage() {
+export default async function AdminEmployeesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string | string[] }>;
+}) {
   const supabase = await createClient();
   await requireHrAdmin(supabase);
 
-  const people = await loadAllProfiles(supabase);
+  const { page: pageParam } = await searchParams;
+
+  const [directory, managerOptions] = await Promise.all([
+    loadProfilePage(supabase, parsePageParam(pageParam)),
+    loadAllProfiles(supabase),
+  ]);
+  const people = directory.rows;
 
   return (
     <div className="mx-auto w-full max-w-4xl flex-1 px-4 py-10 sm:px-8">
@@ -59,14 +78,14 @@ export default async function AdminEmployeesPage() {
         </p>
       </div>
 
-      <EmployeeCreateForm people={people} />
+      <EmployeeCreateForm people={managerOptions} />
 
       <section className="mt-8">
         <h2
           className="font-heading mb-3 text-sm font-semibold uppercase tracking-wide"
           style={{ color: "var(--muted-foreground)" }}
         >
-          Everyone ({people.length})
+          Everyone ({directory.total})
         </h2>
 
         {people.length === 0 ? (
@@ -124,11 +143,19 @@ export default async function AdminEmployeesPage() {
                       : "No line manager"}
                   </p>
                 </div>
-                <EmployeeEditForm person={person} people={people} />
+                <EmployeeEditForm person={person} people={managerOptions} />
               </li>
             ))}
           </ul>
         )}
+
+        <Pagination
+          page={directory.page}
+          pageCount={directory.pageCount}
+          total={directory.total}
+          basePath="/admin"
+          itemLabel="employee"
+        />
       </section>
     </div>
   );

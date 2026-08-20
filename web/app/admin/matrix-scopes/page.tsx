@@ -2,11 +2,13 @@ import Link from "next/link";
 import { ArrowLeft } from "@phosphor-icons/react/dist/ssr/ArrowLeft";
 import { createClient } from "@/lib/supabase/server";
 import { ScopeGrantForm } from "@/components/admin/scope-grant-form";
+import { Pagination } from "@/components/pagination";
 import { SCOPE_TYPE_LABEL } from "@/lib/admin";
+import { parsePageParam } from "@/lib/pagination";
 import {
   loadAdminPlans,
   loadAllProfiles,
-  loadExistingScopeGrants,
+  loadScopeGrantPage,
   loadScopeTargets,
   requireHrAdmin,
   type ScopeTarget,
@@ -21,17 +23,28 @@ import {
  * only checks that a category or objective exists, not that it belongs to the
  * plan being scoped, so "which targets are legitimate for this plan" has to be
  * decided somewhere that a client-supplied id can't influence.
+ *
+ * Only the "Current grants" list below the form is paginated. `people` and
+ * `plans` feed the grant form's own pickers and stay complete: a matrix
+ * manager or a plan you cannot select because it sorted onto page 2 of an
+ * unrelated list is a bug, not a smaller page.
  */
-export default async function MatrixScopesPage() {
+export default async function MatrixScopesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string | string[] }>;
+}) {
   const supabase = await createClient();
   // Re-run independently of layout.tsx: layout and page render concurrently,
   // so the layout's redirect does not prevent these loaders from executing.
   await requireHrAdmin(supabase);
 
+  const { page: pageParam } = await searchParams;
+
   const [people, plans, grants] = await Promise.all([
     loadAllProfiles(supabase),
     loadAdminPlans(supabase),
-    loadExistingScopeGrants(supabase),
+    loadScopeGrantPage(supabase, parsePageParam(pageParam)),
   ]);
 
   const targetEntries = await Promise.all(
@@ -95,10 +108,10 @@ export default async function MatrixScopesPage() {
           className="font-heading mb-3 text-sm font-semibold uppercase tracking-wide"
           style={{ color: "var(--muted-foreground)" }}
         >
-          Current grants ({grants.length})
+          Current grants ({grants.total})
         </h2>
 
-        {grants.length === 0 ? (
+        {grants.total === 0 ? (
           <p
             className="rounded-2xl border border-dashed p-6 text-sm"
             style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
@@ -107,7 +120,7 @@ export default async function MatrixScopesPage() {
           </p>
         ) : (
           <ul className="flex flex-col gap-3">
-            {grants.map((grant) => {
+            {grants.rows.map((grant) => {
               const plan = planById.get(grant.employee_goal_plan_id);
               return (
                 <li
@@ -141,6 +154,14 @@ export default async function MatrixScopesPage() {
             })}
           </ul>
         )}
+
+        <Pagination
+          page={grants.page}
+          pageCount={grants.pageCount}
+          total={grants.total}
+          basePath="/admin/matrix-scopes"
+          itemLabel="grant"
+        />
       </section>
     </div>
   );
