@@ -577,26 +577,128 @@ select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001
 do $$
 declare
   v_rows int;
-  v_final_score numeric;
-  v_band text;
+  v_names text[];
+  v_dara_manager text;
+  v_expected_manager text;
+  v_vuthy_manager text;
+  v_dara_scale integer;
+  v_expected_dara_scale integer;
+  v_vuthy_scale integer;
+  v_expected_vuthy_scale integer;
+  v_dara_final numeric;
+  v_dara_manager_score numeric;
+  v_vuthy_final numeric;
+  v_vuthy_manager_score numeric;
+  v_dara_band text;
+  v_vuthy_band text;
+  v_empty_rows int;
 begin
-  select count(*) into v_rows
-  from public.comp_export_rows('22222222-2222-4222-8222-000000000001')
-  where employee_id = '11111111-1111-4111-8111-000000000004';
+  -- Vuthy's manager-rated, uncalibrated plan is the second published row.
+  perform public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000e');
 
-  if v_rows <> 1 then
-    raise exception 'Expected HR to see exactly 1 comp export row for Dara, got %', v_rows;
+  -- A manager-less employee is a distinct export case. Keep the fixture local
+  -- to this transaction so the seed remains realistic and untouched.
+  update public.profiles
+  set manager_id = null
+  where id = '11111111-1111-4111-8111-000000000008';
+
+  select count(*), array_agg(export.full_name)
+  into v_rows, v_names
+  from public.comp_export_rows('22222222-2222-4222-8222-000000000001') as export;
+
+  if v_rows <> 2 then
+    raise exception 'Expected HR to see exactly 2 comp export rows after publishing Vuthy, got %', v_rows;
+  end if;
+  if v_names is distinct from array['Dara Sok', 'Vuthy Long']::text[] then
+    raise exception 'Expected comp export ordered by full_name, got %', v_names;
   end if;
 
-  select final_score, band_label into v_final_score, v_band
-  from public.comp_export_rows('22222222-2222-4222-8222-000000000001')
-  where employee_id = '11111111-1111-4111-8111-000000000004';
+  select
+    export.manager_full_name,
+    export.overall_rating_scale_max,
+    export.final_score,
+    export.band_label
+  into v_dara_manager, v_dara_scale, v_dara_final, v_dara_band
+  from public.comp_export_rows('22222222-2222-4222-8222-000000000001') as export
+  where export.employee_id = '11111111-1111-4111-8111-000000000004';
 
-  if v_final_score <> 3.200 or v_band <> 'Meets Expectations' then
-    raise exception 'Expected final_score 3.200 / band Meets Expectations, got % / %', v_final_score, v_band;
+  select manager.full_name, plan.overall_rating_scale_max, rating.overall_score
+  into v_expected_manager, v_expected_dara_scale, v_dara_manager_score
+  from public.employee_goal_plan as plan
+  join public.profiles as employee on employee.id = plan.employee_id
+  left join public.profiles as manager on manager.id = employee.manager_id
+  join public.goal_plan_rating as rating
+    on rating.employee_goal_plan_id = plan.id
+   and rating.rating_type = 'manager'::public.rating_type
+  where plan.id = '33333333-3333-4333-8333-00000000000a';
+
+  select
+    export.manager_full_name,
+    export.overall_rating_scale_max,
+    export.final_score,
+    export.band_label
+  into v_vuthy_manager, v_vuthy_scale, v_vuthy_final, v_vuthy_band
+  from public.comp_export_rows('22222222-2222-4222-8222-000000000001') as export
+  where export.employee_id = '11111111-1111-4111-8111-000000000008';
+
+  select plan.overall_rating_scale_max, rating.overall_score
+  into v_expected_vuthy_scale, v_vuthy_manager_score
+  from public.employee_goal_plan as plan
+  join public.goal_plan_rating as rating
+    on rating.employee_goal_plan_id = plan.id
+   and rating.rating_type = 'manager'::public.rating_type
+  where plan.id = '33333333-3333-4333-8333-00000000000e';
+
+  if v_dara_manager is distinct from v_expected_manager then
+    raise exception 'Expected Dara manager %, got %', v_expected_manager, v_dara_manager;
+  end if;
+  if v_vuthy_manager is not null then
+    raise exception 'Expected manager_full_name null for manager-less Vuthy fixture, got %', v_vuthy_manager;
   end if;
 
-  raise notice 'PASS: HR sees Dara''s comp export row with final_score 3.200 / Meets Expectations';
+  if v_dara_scale is distinct from v_expected_dara_scale
+     or v_vuthy_scale is distinct from v_expected_vuthy_scale then
+    raise exception
+      'Expected export scales to match each plan (% / %), got % / %',
+      v_expected_dara_scale, v_expected_vuthy_scale, v_dara_scale, v_vuthy_scale;
+  end if;
+
+  if v_dara_final is distinct from 3.200::numeric
+     or v_dara_final is not distinct from v_dara_manager_score then
+    raise exception
+      'Expected Dara calibrated score 3.200 to override manager score %, got %',
+      v_dara_manager_score, v_dara_final;
+  end if;
+  if v_vuthy_final is distinct from v_vuthy_manager_score then
+    raise exception
+      'Expected uncalibrated Vuthy final score to use manager score %, got %',
+      v_vuthy_manager_score, v_vuthy_final;
+  end if;
+
+  if v_dara_band is null then
+    raise exception 'Expected calibrated Dara export row to have a band label';
+  end if;
+  if v_vuthy_band is not null then
+    raise exception 'Expected uncalibrated Vuthy export row to have null band, got %', v_vuthy_band;
+  end if;
+
+  insert into public.review_cycle (id, name, start_date, end_date, status)
+  values (
+    '22222222-2222-4222-8222-0000000000ff',
+    'Comp export empty-cycle fixture',
+    '2027-01-01',
+    '2027-12-31',
+    'draft'
+  );
+
+  select count(*) into v_empty_rows
+  from public.comp_export_rows('22222222-2222-4222-8222-0000000000ff');
+
+  if v_empty_rows <> 0 then
+    raise exception 'Expected a cycle with no published plans to return 0 rows, got %', v_empty_rows;
+  end if;
+
+  raise notice 'PASS: comp_export_rows multi-row ordering, managers, plan scales, score precedence, bands, and empty cycles';
 end $$;
 rollback;
 

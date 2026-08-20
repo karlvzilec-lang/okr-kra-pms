@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { ChartLineUp } from "@phosphor-icons/react/dist/ssr/ChartLineUp";
 import { Users } from "@phosphor-icons/react/dist/ssr/Users";
 import { ShieldCheck } from "@phosphor-icons/react/dist/ssr/ShieldCheck";
+import { FileCsv } from "@phosphor-icons/react/dist/ssr/FileCsv";
 import { createClient } from "@/lib/supabase/server";
 import { LogoutButton } from "@/components/logout-button";
 import { isPasswordExpired } from "@/lib/password";
@@ -108,6 +109,14 @@ function AdminHeader({ showNav }: { showNav: boolean }) {
             >
               <ShieldCheck size={16} weight="bold" aria-hidden="true" />
               Matrix access
+            </Link>
+            <Link
+              href="/admin/comp-export"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-4 text-sm font-medium transition-colors hover:bg-[var(--muted)] active:scale-[0.98]"
+              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+            >
+              <FileCsv size={16} weight="bold" aria-hidden="true" />
+              Comp export
             </Link>
           </>
         )}
