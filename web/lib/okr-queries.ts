@@ -10,6 +10,7 @@
 // apply_check_in_to_key_result); the UI only ever reads them back.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { rangeFor, refetchIfClamped, type Paginated } from "@/lib/pagination";
 import type {
   CheckIn,
   KeyResult,
@@ -63,41 +64,61 @@ type RawObjectiveRow = {
   key_result: { count: number }[] | null;
 };
 
+function shapeObjective(row: RawObjectiveRow): ObjectiveWithCycle {
+  const cycle = firstOf(row.review_cycle);
+  return {
+    id: row.id,
+    review_cycle_id: row.review_cycle_id,
+    owner_id: row.owner_id,
+    title: row.title,
+    description: row.description,
+    status: row.status,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    review_cycle_name: cycle?.name ?? null,
+    review_cycle_status: cycle?.status ?? null,
+    key_result_count: row.key_result?.[0]?.count ?? 0,
+  };
+}
+
+const OWN_OBJECTIVE_SELECT =
+  "id, review_cycle_id, owner_id, title, description, status, created_at, updated_at, " +
+  "review_cycle(name, status), key_result(count)";
+
 /**
- * The signed-in user's own objectives. Scoped by owner_id rather than relying
- * on the select policy alone: can_read_objective also exposes a manager's
- * objectives upward, and this list is explicitly "mine", not "everything I can
- * see".
+ * One page of the signed-in user's own objectives, newest first.
+ *
+ * Scoped by owner_id for the same reason loadOwnObjectives is: can_read_objective
+ * also exposes a manager's objectives upward, and this list means "mine", not
+ * "everything I can see". The count is exact and rides the same request, so it
+ * counts the owner-filtered set rather than every objective RLS would allow.
+ *
+ * `id` breaks ties on created_at. Objectives are usually authored one at a
+ * time, but seeded or scripted rows land in a single transaction and share a
+ * timestamp exactly, which is enough to make an untiebroken sort unstable
+ * across two page requests.
  */
-export async function loadOwnObjectives(
+export async function loadOwnObjectivePage(
   supabase: SupabaseClient,
   userId: string,
-): Promise<ObjectiveWithCycle[]> {
-  const { data } = await supabase
-    .from("objective")
-    .select(
-      "id, review_cycle_id, owner_id, title, description, status, created_at, updated_at, " +
-        "review_cycle(name, status), key_result(count)",
-    )
-    .eq("owner_id", userId)
-    .order("created_at", { ascending: false });
+  page: number,
+): Promise<Paginated<ObjectiveWithCycle>> {
+  const { from, to } = rangeFor(page);
 
-  return ((data ?? []) as unknown as RawObjectiveRow[]).map((row) => {
-    const cycle = firstOf(row.review_cycle);
-    return {
-      id: row.id,
-      review_cycle_id: row.review_cycle_id,
-      owner_id: row.owner_id,
-      title: row.title,
-      description: row.description,
-      status: row.status,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-      review_cycle_name: cycle?.name ?? null,
-      review_cycle_status: cycle?.status ?? null,
-      key_result_count: row.key_result?.[0]?.count ?? 0,
-    };
-  });
+  const { data, count } = await supabase
+    .from("objective")
+    .select(OWN_OBJECTIVE_SELECT, { count: "exact" })
+    .eq("owner_id", userId)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: true })
+    .range(from, to);
+
+  const total = count ?? 0;
+  const rows = ((data ?? []) as unknown as RawObjectiveRow[]).map(shapeObjective);
+
+  return refetchIfClamped(rows, total, page, (target) =>
+    loadOwnObjectivePage(supabase, userId, target),
+  );
 }
 
 export type ObjectiveDetail = ObjectiveWithCycle & { key_results: KeyResult[] };

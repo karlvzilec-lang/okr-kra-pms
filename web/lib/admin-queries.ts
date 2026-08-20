@@ -22,6 +22,7 @@
 import { redirect } from "next/navigation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isPasswordExpired } from "@/lib/password";
+import { rangeFor, refetchIfClamped, type Paginated } from "@/lib/pagination";
 import type {
   Goal,
   GoalPlanStatus,
@@ -110,6 +111,14 @@ type RawProfileRow = Profile & {
  * manager's list of reports, while `manager_id(full_name)` returns the one
  * row `manager_id` actually points to. The column-only form is unambiguous
  * because a single column can only be the "many" side of its own FK.
+ *
+ * UNBOUNDED on purpose. This is the list that feeds the manager <select> in
+ * the create and edit forms, and a picker that silently omits candidates
+ * because they happen to sort onto another page of the directory would be a
+ * data-entry bug rather than a UX shortcoming — you would assign the wrong
+ * manager, or conclude the right one doesn't exist. The directory's own
+ * rendered rows come from loadProfilePage() instead; the two are separate
+ * queries because they answer separate questions.
  */
 export async function loadAllProfiles(
   supabase: SupabaseClient,
@@ -117,9 +126,14 @@ export async function loadAllProfiles(
   const { data } = await supabase
     .from("profiles")
     .select(`${PROFILE_COLUMNS}, manager:manager_id(full_name)`)
-    .order("full_name", { ascending: true });
+    .order("full_name", { ascending: true })
+    .order("id", { ascending: true });
 
-  return ((data ?? []) as unknown as RawProfileRow[]).map((row) => ({
+  return ((data ?? []) as unknown as RawProfileRow[]).map(shapeProfile);
+}
+
+function shapeProfile(row: RawProfileRow): ProfileWithManager {
+  return {
     id: row.id,
     full_name: row.full_name,
     email: row.email,
@@ -129,7 +143,38 @@ export async function loadAllProfiles(
     created_at: row.created_at,
     updated_at: row.updated_at,
     manager_name: firstOf(row.manager)?.full_name ?? null,
-  }));
+  };
+}
+
+/**
+ * One page of the employee directory, plus the total.
+ *
+ * `id` is the tiebreaker after `full_name` because full_name carries no unique
+ * constraint — two people genuinely can share a name, and without a unique
+ * final sort key Postgres is free to order the tied rows differently between
+ * the page-1 and page-2 queries, which would show one of them twice and drop
+ * the other entirely.
+ *
+ * The count is `exact` and rides along on the same request as the rows, so it
+ * counts what RLS actually exposes to this caller rather than the raw table.
+ */
+export async function loadProfilePage(
+  supabase: SupabaseClient,
+  page: number,
+): Promise<Paginated<ProfileWithManager>> {
+  const { from, to } = rangeFor(page);
+
+  const { data, count } = await supabase
+    .from("profiles")
+    .select(`${PROFILE_COLUMNS}, manager:manager_id(full_name)`, { count: "exact" })
+    .order("full_name", { ascending: true })
+    .order("id", { ascending: true })
+    .range(from, to);
+
+  const total = count ?? 0;
+  const rows = ((data ?? []) as unknown as RawProfileRow[]).map(shapeProfile);
+
+  return refetchIfClamped(rows, total, page, (target) => loadProfilePage(supabase, target));
 }
 
 // ---------------------------------------------------------------------------
@@ -263,33 +308,58 @@ type RawScopeRow = {
     | null;
 };
 
-/** Scope grants already in place, so the screen shows state rather than a blank form. */
-export async function loadExistingScopeGrants(
-  supabase: SupabaseClient,
-): Promise<ExistingScopeGrant[]> {
-  const { data } = await supabase
-    .from("review_participant_scope")
-    .select(
-      "id, scope_type, scope_id, created_at, " +
-        "review_participant(participant_id, employee_goal_plan_id, profiles(full_name))",
-    )
-    .order("created_at", { ascending: false });
+const SCOPE_GRANT_SELECT =
+  "id, scope_type, scope_id, created_at, " +
+  "review_participant(participant_id, employee_goal_plan_id, profiles(full_name))";
 
-  return ((data ?? []) as unknown as RawScopeRow[])
-    .map((row) => {
-      const participant = firstOf(row.review_participant);
-      if (!participant) return null;
-      return {
-        id: row.id,
-        scope_type: row.scope_type,
-        scope_id: row.scope_id,
-        participant_id: participant.participant_id,
-        participant_name: firstOf(participant.profiles)?.full_name ?? "Unknown",
-        employee_goal_plan_id: participant.employee_goal_plan_id,
-        granted_at: row.created_at,
-      };
-    })
+function shapeScopeGrant(row: RawScopeRow): ExistingScopeGrant | null {
+  const participant = firstOf(row.review_participant);
+  if (!participant) return null;
+  return {
+    id: row.id,
+    scope_type: row.scope_type,
+    scope_id: row.scope_id,
+    participant_id: participant.participant_id,
+    participant_name: firstOf(participant.profiles)?.full_name ?? "Unknown",
+    employee_goal_plan_id: participant.employee_goal_plan_id,
+    granted_at: row.created_at,
+  };
+}
+
+/**
+ * One page of the scope grants already in place, so the screen shows state
+ * rather than a blank form.
+ *
+ * Newest first, with `id` breaking ties on created_at — two grants issued in
+ * the same transaction share a timestamp to the microsecond, and that is not a
+ * hypothetical here: granting several scopes to one matrix manager in a single
+ * sitting is the normal way this screen is used.
+ *
+ * The count is taken before the null-participant filter below, which is
+ * correct: review_participant is a NOT NULL FK, so the embed is only null when
+ * RLS hides the parent row, and PostgREST has already applied that same RLS to
+ * the count. In practice the filter drops nothing and the count matches; it
+ * stays as a type guard rather than as list surgery.
+ */
+export async function loadScopeGrantPage(
+  supabase: SupabaseClient,
+  page: number,
+): Promise<Paginated<ExistingScopeGrant>> {
+  const { from, to } = rangeFor(page);
+
+  const { data, count } = await supabase
+    .from("review_participant_scope")
+    .select(SCOPE_GRANT_SELECT, { count: "exact" })
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: true })
+    .range(from, to);
+
+  const total = count ?? 0;
+  const rows = ((data ?? []) as unknown as RawScopeRow[])
+    .map(shapeScopeGrant)
     .filter((row): row is ExistingScopeGrant => row !== null);
+
+  return refetchIfClamped(rows, total, page, (target) => loadScopeGrantPage(supabase, target));
 }
 
 // ---------------------------------------------------------------------------

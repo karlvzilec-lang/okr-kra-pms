@@ -7,7 +7,9 @@ import { createClient } from "@/lib/supabase/server";
 import { LogoutButton } from "@/components/logout-button";
 import { NewSessionForm } from "@/components/calibration/new-session-form";
 import { SessionStatusPill } from "@/components/calibration/session-status-pill";
+import { Pagination } from "@/components/pagination";
 import { isPasswordExpired } from "@/lib/password";
+import { clampPage, pageCountFor, parsePageParam, rangeFor } from "@/lib/pagination";
 import type {
   CalibrationSessionListItem,
   CalibrationSessionStatus,
@@ -31,7 +33,19 @@ function cycleName(row: SessionRow): string | null {
     : row.review_cycle.name;
 }
 
-export default async function CalibrationIndexPage() {
+/**
+ * The session index.
+ *
+ * The session list is paginated; the review-cycle list feeding NewSessionForm's
+ * <select> is not. A cycle you cannot pick because it fell onto another page of
+ * an unrelated list would make sessions uncreatable for that cycle, and cycles
+ * are low-cardinality anyway.
+ */
+export default async function CalibrationIndexPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string | string[] }>;
+}) {
   const supabase = await createClient();
 
   const {
@@ -78,13 +92,26 @@ export default async function CalibrationIndexPage() {
     );
   }
 
-  const [{ data: sessionRows, error: sessionsError }, { data: cycleRows }] = await Promise.all([
+  const requestedPage = parsePageParam((await searchParams).page);
+  const { from, to } = rangeFor(requestedPage);
+
+  const [
+    { data: sessionRows, count: sessionCount, error: sessionsError },
+    { data: cycleRows },
+  ] = await Promise.all([
     supabase
       .from("calibration_session")
       .select(
         "id, name, status, review_cycle_id, created_at, review_cycle(name), calibration_participant(count)",
+        { count: "exact" },
       )
-      .order("created_at", { ascending: false }),
+      // id breaks the tie on created_at: sessions seeded or created in one
+      // transaction share a timestamp exactly, and an untiebroken sort can
+      // order them differently between the page-1 and page-2 requests, showing
+      // one session twice and hiding another entirely.
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: true })
+      .range(from, to),
     supabase
       .from("review_cycle")
       .select("id, name")
@@ -104,6 +131,19 @@ export default async function CalibrationIndexPage() {
   );
 
   const cycles: ReviewCycleOption[] = (cycleRows ?? []) as ReviewCycleOption[];
+
+  const sessionTotal = sessionCount ?? 0;
+  const page = clampPage(requestedPage, sessionTotal);
+  const pageCount = pageCountFor(sessionTotal);
+
+  // A .range() past the last row succeeds and returns nothing, so a stale
+  // ?page=99 would otherwise render an empty list under a caption claiming
+  // there are 40 sessions. The paginated loaders in lib/ re-fetch at the
+  // clamped page; this query is inline, so it redirects instead — the URL then
+  // matches the page actually shown, which is the better of the two outcomes.
+  if (page !== requestedPage && sessions.length === 0 && sessionTotal > 0) {
+    redirect(page <= 1 ? "/calibration" : `/calibration?page=${page}`);
+  }
 
   return (
     <main className="flex flex-1 flex-col" style={{ backgroundColor: "var(--background)" }}>
@@ -151,7 +191,7 @@ export default async function CalibrationIndexPage() {
             All sessions
           </h2>
 
-          {sessions.length === 0 && !sessionsError ? (
+          {sessionTotal === 0 && !sessionsError ? (
             <p
               className="rounded-2xl border border-dashed p-6 text-sm"
               style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
@@ -200,6 +240,14 @@ export default async function CalibrationIndexPage() {
               ))}
             </ul>
           )}
+
+          <Pagination
+            page={page}
+            pageCount={pageCount}
+            total={sessionTotal}
+            basePath="/calibration"
+            itemLabel="session"
+          />
         </section>
       </div>
     </main>

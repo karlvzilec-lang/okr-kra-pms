@@ -5,11 +5,17 @@ import { ArrowLeft } from "@phosphor-icons/react/dist/ssr/ArrowLeft";
 import { CaretRight } from "@phosphor-icons/react/dist/ssr/CaretRight";
 import { createClient } from "@/lib/supabase/server";
 import { LogoutButton } from "@/components/logout-button";
+import { Pagination } from "@/components/pagination";
 import { isPasswordExpired } from "@/lib/password";
-import { loadManagerReports } from "@/lib/goal-plan-queries";
+import { loadManagerReportPage } from "@/lib/goal-plan-queries";
+import { parsePageParam } from "@/lib/pagination";
 import { managerCanRate, PLAN_STATUS_LABEL } from "@/lib/goals";
 
-export default async function ReportsPage() {
+export default async function ReportsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string | string[] }>;
+}) {
   const supabase = await createClient();
 
   const {
@@ -30,7 +36,8 @@ export default async function ReportsPage() {
     redirect("/change-password");
   }
 
-  const reports = await loadManagerReports(supabase, user.id);
+  const { page: pageParam } = await searchParams;
+  const reports = await loadManagerReportPage(supabase, user.id, parsePageParam(pageParam));
 
   return (
     <main className="flex flex-1 flex-col" style={{ backgroundColor: "var(--background)" }}>
@@ -75,7 +82,7 @@ export default async function ReportsPage() {
           </p>
         </div>
 
-        {reports.length === 0 ? (
+        {reports.total === 0 ? (
           <p
             className="rounded-2xl border border-dashed p-6 text-sm"
             style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
@@ -84,7 +91,7 @@ export default async function ReportsPage() {
           </p>
         ) : (
           <ul className="flex flex-col gap-3">
-            {reports.map((report) => {
+            {reports.rows.map((report) => {
               const open = managerCanRate(report.status, report.review_cycle_status);
               return (
                 <li key={report.id}>
@@ -125,6 +132,14 @@ export default async function ReportsPage() {
             })}
           </ul>
         )}
+
+        <Pagination
+          page={reports.page}
+          pageCount={reports.pageCount}
+          total={reports.total}
+          basePath="/reports"
+          itemLabel="plan"
+        />
       </div>
     </main>
   );

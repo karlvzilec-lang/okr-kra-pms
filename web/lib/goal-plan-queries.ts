@@ -5,6 +5,7 @@
 // nested select keeps the plan/category/goal shape in one round trip.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { rangeFor, refetchIfClamped, type Paginated } from "@/lib/pagination";
 import type {
   EmployeeGoalPlan,
   Goal,
@@ -115,19 +116,16 @@ export async function loadOwnPlanForCycle(
 }
 
 type RawReportRow = {
-  employee_goal_plan_id: string;
-  employee_goal_plan: {
-    id: string;
-    status: GoalPlanStatus;
-    employee_id: string;
-    review_cycle_id: string;
-    profiles: { full_name: string } | { full_name: string }[] | null;
-    review_cycle:
-      | { name: string; status: ReviewCycleStatus }
-      | { name: string; status: ReviewCycleStatus }[]
-      | null;
-    kra_category: { goal: { manager_rating: number | null }[] | null }[] | null;
-  } | null;
+  id: string;
+  status: GoalPlanStatus;
+  employee_id: string;
+  review_cycle_id: string;
+  profiles: { full_name: string } | { full_name: string }[] | null;
+  review_cycle:
+    | { name: string; status: ReviewCycleStatus }
+    | { name: string; status: ReviewCycleStatus }[]
+    | null;
+  kra_category: { goal: { manager_rating: number | null }[] | null }[] | null;
 };
 
 function firstOf<T>(value: T | T[] | null): T | null {
@@ -135,40 +133,84 @@ function firstOf<T>(value: T | T[] | null): T | null {
   return Array.isArray(value) ? (value[0] ?? null) : value;
 }
 
-/** Every plan the signed-in user is a line_manager participant on. */
-export async function loadManagerReports(
+/**
+ * Every plan the signed-in user is a line_manager participant on, one page at
+ * a time.
+ *
+ * This drives FROM employee_goal_plan and filters by an INNER-joined
+ * review_participant, rather than the reverse (selecting review_participant
+ * rows and reading the plan out of the embed). The inversion is what makes
+ * pagination correct, and it was verified against the running PostgREST rather
+ * than assumed:
+ *
+ *   * The old shape returned one row per PARTICIPANT record and then dropped
+ *     any whose embedded plan came back null, plus sorted by employee_name in
+ *     JS after the fetch. Both steps happen AFTER the rows arrive, so a
+ *     .range() bolted onto it would have paginated the pre-filter, pre-sort
+ *     set: page 1 could return fewer than PAGE_SIZE rendered rows while later
+ *     pages still existed, and the alphabetical order would only hold WITHIN a
+ *     page, not across the list — page 2 could open with a name earlier than
+ *     the one page 1 ended on. That is a page control that lies about where
+ *     you are, so it could not ship as-is.
+ *
+ *   * Sorting the old shape in SQL instead was not available either: PostgREST
+ *     rejects an order key that reaches through two embeds
+ *     (`order=employee_goal_plan(profiles(full_name)).asc` → PGRST100,
+ *     "failed to parse order"). Confirmed by request.
+ *
+ *   * Driving from employee_goal_plan with `review_participant!inner` moves
+ *     both the filter and the sort into the query. `profiles!inner(full_name)`
+ *     is orderable as a single-level embed, `count=exact` then counts the
+ *     joined-and-filtered set, and .range() slices the same final row set the
+ *     page renders. Verified: the inverted query returned content-range
+ *     `0-2/3` unpaged and `0-1/3` with Range 0-1 — the total is the filtered
+ *     total, and the slice is a true slice of it.
+ *
+ * The `!inner` on review_participant is load-bearing: without it PostgREST
+ * left-joins, and a plan with no matching participant row would come back with
+ * an empty embed instead of being excluded — every plan RLS lets you see,
+ * rather than only the ones you line-manage.
+ */
+export async function loadManagerReportPage(
   supabase: SupabaseClient,
   userId: string,
-): Promise<ManagerReportPlan[]> {
-  const { data } = await supabase
-    .from("review_participant")
+  page: number,
+): Promise<Paginated<ManagerReportPlan>> {
+  const { from, to } = rangeFor(page);
+
+  const { data, count } = await supabase
+    .from("employee_goal_plan")
     .select(
-      "employee_goal_plan_id, employee_goal_plan(id, status, employee_id, review_cycle_id, " +
-        "profiles(full_name), review_cycle(name, status), kra_category(goal(manager_rating)))",
+      "id, status, employee_id, review_cycle_id, profiles!inner(full_name), " +
+        "review_cycle(name, status), kra_category(goal(manager_rating)), " +
+        "review_participant!inner(participant_id, role)",
+      { count: "exact" },
     )
-    .eq("participant_id", userId)
-    .eq("role", "line_manager");
+    .eq("review_participant.participant_id", userId)
+    .eq("review_participant.role", "line_manager")
+    .order("full_name", { ascending: true, referencedTable: "profiles" })
+    .order("id", { ascending: true })
+    .range(from, to);
 
-  const rows = (data ?? []) as unknown as RawReportRow[];
+  const total = count ?? 0;
+  const rows = ((data ?? []) as unknown as RawReportRow[]).map((plan) => {
+    const goals = (plan.kra_category ?? []).flatMap((category) => category.goal ?? []);
+    const cycle = firstOf(plan.review_cycle);
 
-  return rows
-    .map((row) => row.employee_goal_plan)
-    .filter((plan): plan is NonNullable<RawReportRow["employee_goal_plan"]> => Boolean(plan))
-    .map((plan) => {
-      const goals = (plan.kra_category ?? []).flatMap((category) => category.goal ?? []);
-      const cycle = firstOf(plan.review_cycle);
+    return {
+      id: plan.id,
+      status: plan.status,
+      employee_id: plan.employee_id,
+      employee_name: firstOf(plan.profiles)?.full_name ?? "Unknown employee",
+      review_cycle_id: plan.review_cycle_id,
+      review_cycle_name: cycle?.name ?? null,
+      review_cycle_status: cycle?.status ?? null,
+      goal_count: goals.length,
+      manager_rated_count: goals.filter((goal) => goal.manager_rating !== null).length,
+    };
+  });
 
-      return {
-        id: plan.id,
-        status: plan.status,
-        employee_id: plan.employee_id,
-        employee_name: firstOf(plan.profiles)?.full_name ?? "Unknown employee",
-        review_cycle_id: plan.review_cycle_id,
-        review_cycle_name: cycle?.name ?? null,
-        review_cycle_status: cycle?.status ?? null,
-        goal_count: goals.length,
-        manager_rated_count: goals.filter((goal) => goal.manager_rating !== null).length,
-      };
-    })
-    .sort((a, b) => a.employee_name.localeCompare(b.employee_name));
+  return refetchIfClamped(rows, total, page, (target) =>
+    loadManagerReportPage(supabase, userId, target),
+  );
 }

@@ -7,11 +7,17 @@ import { createClient } from "@/lib/supabase/server";
 import { LogoutButton } from "@/components/logout-button";
 import { NewObjectiveForm } from "@/components/okr/new-objective-form";
 import { CycleStatusPill } from "@/components/cycles/cycle-status-pill";
+import { Pagination } from "@/components/pagination";
 import { isPasswordExpired } from "@/lib/password";
-import { loadOwnObjectives, loadReviewCycles } from "@/lib/okr-queries";
+import { loadOwnObjectivePage, loadReviewCycles } from "@/lib/okr-queries";
+import { parsePageParam } from "@/lib/pagination";
 import { cycleIsClosed } from "@/lib/okr";
 
-export default async function ObjectivesPage() {
+export default async function ObjectivesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string | string[] }>;
+}) {
   const supabase = await createClient();
 
   const {
@@ -32,9 +38,11 @@ export default async function ObjectivesPage() {
     redirect("/change-password");
   }
 
+  const { page: pageParam } = await searchParams;
+
   const [cycles, objectives] = await Promise.all([
     loadReviewCycles(supabase),
-    loadOwnObjectives(supabase, user.id),
+    loadOwnObjectivePage(supabase, user.id, parsePageParam(pageParam)),
   ]);
 
   return (
@@ -75,7 +83,7 @@ export default async function ObjectivesPage() {
             All my objectives
           </h2>
 
-          {objectives.length === 0 ? (
+          {objectives.total === 0 ? (
             <p
               className="rounded-2xl border border-dashed p-6 text-sm"
               style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
@@ -84,7 +92,7 @@ export default async function ObjectivesPage() {
             </p>
           ) : (
             <ul className="flex flex-col gap-3">
-              {objectives.map((objective) => (
+              {objectives.rows.map((objective) => (
                 <li key={objective.id}>
                   <Link
                     href={`/objectives/${objective.id}`}
@@ -123,6 +131,14 @@ export default async function ObjectivesPage() {
               ))}
             </ul>
           )}
+
+          <Pagination
+            page={objectives.page}
+            pageCount={objectives.pageCount}
+            total={objectives.total}
+            basePath="/objectives"
+            itemLabel="objective"
+          />
         </section>
       </div>
     </main>
