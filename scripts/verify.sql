@@ -482,14 +482,16 @@ rollback;
 -- calibration session is still open
 -- ============================================================================
 begin;
-update public.calibration_session
-set status = 'open'
-where id = '44444444-4444-4444-8444-000000000001';
-update public.employee_goal_plan
-set published_at = null
-where id = '33333333-3333-4333-8333-00000000000a';
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+select public.unpublish_employee_goal_plan(
+  '33333333-3333-4333-8333-00000000000a',
+  'verification setup for open publish guard'
+);
+select public.unfinalize_calibration_session(
+  '44444444-4444-4444-8444-000000000001',
+  'verification setup for open publish guard'
+);
 do $$
 begin
   begin
@@ -507,10 +509,12 @@ rollback;
 -- self block is always null, before AND after publication
 -- ============================================================================
 begin;
-update public.employee_goal_plan
-set published_at = null
-where id = '33333333-3333-4333-8333-00000000000a';
 set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+select public.unpublish_employee_goal_plan(
+  '33333333-3333-4333-8333-00000000000a',
+  'verification setup for pre-publish summary'
+);
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
 do $$
 declare
@@ -849,7 +853,8 @@ begin
     raise exception 'Unexpected calibration detail keys: %', v_outer_keys;
   end if;
   if v_session_keys <> array[
-    'created_at', 'id', 'name', 'review_cycle_id', 'review_cycle_name',
+    'created_at', 'id', 'last_unfinalize_reason', 'last_unfinalized_at',
+    'last_unfinalized_by', 'name', 'review_cycle_id', 'review_cycle_name',
     'status', 'updated_at'
   ]::text[] then
     raise exception 'Unexpected calibration session keys: %', v_session_keys;
@@ -862,8 +867,8 @@ begin
   if v_participant_keys <> array[
     'band_id', 'calibrated_score', 'employee_email', 'employee_full_name',
     'employee_goal_plan_id', 'employee_id', 'facilitator_note', 'id',
-    'manager_full_name', 'original_score', 'overall_rating_scale_max',
-    'published_at'
+    'last_unpublish_reason', 'last_unpublished_at', 'last_unpublished_by',
+    'manager_full_name', 'original_score', 'overall_rating_scale_max', 'published_at'
   ]::text[] then
     raise exception 'Unexpected calibration participant keys: %', v_participant_keys;
   end if;
@@ -909,9 +914,12 @@ rollback;
 -- already in this session. Each exclusion is isolated in this transaction.
 -- ============================================================================
 begin;
-update public.employee_goal_plan
-set published_at = null
-where id = '33333333-3333-4333-8333-00000000000a';
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+select public.unpublish_employee_goal_plan(
+  '33333333-3333-4333-8333-00000000000a',
+  'verification setup for eligible plan listing'
+);
 
 insert into public.goal_plan_rating (
   employee_goal_plan_id, rating_type, overall_score
@@ -3718,4 +3726,495 @@ begin
 end $$;
 rollback;
 
-\echo 'ALL 96 CHECKS PASSED'
+-- ============================================================================
+-- Calibration reversal Gate 1: grant tightening and the complete controlled
+-- unpublish -> unfinalize -> adjust -> finalize -> publish round trip.
+-- ============================================================================
+do $$
+begin
+  if has_table_privilege('authenticated', 'public.calibration_session', 'INSERT')
+     or has_table_privilege('authenticated', 'public.calibration_session', 'UPDATE')
+     or has_table_privilege('authenticated', 'public.calibration_session', 'DELETE')
+     or has_table_privilege('authenticated', 'public.calibration_band', 'INSERT')
+     or has_table_privilege('authenticated', 'public.calibration_band', 'UPDATE')
+     or has_table_privilege('authenticated', 'public.calibration_band', 'DELETE') then
+    raise exception 'Authenticated still has a direct calibration session/band write grant';
+  end if;
+
+  if exists (
+    select 1
+    from pg_policies
+    where schemaname = 'public'
+      and policyname in ('calibration_session_hr_all', 'calibration_band_hr_all')
+  ) then
+    raise exception 'Blanket HR calibration session/band policies still exist';
+  end if;
+
+  raise notice 'PASS: authenticated session/band write grants and blanket HR policies are removed';
+end $$;
+
+begin;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+
+do $$
+declare
+  v_status public.calibration_session_status;
+begin
+  begin
+    update public.calibration_session
+    set status = 'open'
+    where id = '44444444-4444-4444-8444-000000000001';
+    raise exception 'ASSERTION FAILED: raw HR-context unfinalize should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  select status into v_status
+  from public.calibration_session
+  where id = '44444444-4444-4444-8444-000000000001';
+
+  if v_status <> 'finalized'::public.calibration_session_status then
+    raise exception 'Raw unfinalize changed the seeded session to %', v_status;
+  end if;
+
+  raise notice 'PASS: raw HR-context unfinalize raises 55000 and leaves the session finalized';
+end $$;
+
+set local role authenticated;
+do $$
+declare
+  v_participant_id uuid;
+begin
+  select id into v_participant_id
+  from public.calibration_participant
+  where calibration_session_id = '44444444-4444-4444-8444-000000000001'
+    and employee_goal_plan_id = '33333333-3333-4333-8333-00000000000a';
+
+  begin
+    perform public.adjust_calibration_participant(v_participant_id, 3.300, 'must remain locked');
+    raise exception 'ASSERTION FAILED: published participant adjustment should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: adjustment remains blocked for Dara in the finalized published fixture';
+end $$;
+
+set local role service_role;
+do $$
+begin
+  begin
+    update public.calibration_session
+    set status = 'open'
+    where id = '44444444-4444-4444-8444-000000000001';
+    raise exception 'ASSERTION FAILED: service_role raw unfinalize should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  perform set_config('app.calibration_unfinalize_token', 'on', true);
+  begin
+    update public.calibration_session
+    set status = 'open'
+    where id = '44444444-4444-4444-8444-000000000001';
+    raise exception 'ASSERTION FAILED: forged static unfinalize token should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  begin
+    update public.employee_goal_plan
+    set published_at = null
+    where id = '33333333-3333-4333-8333-00000000000a';
+    raise exception 'ASSERTION FAILED: service_role raw unpublish should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  perform set_config('app.calibration_unpublish_token', 'on', true);
+  begin
+    update public.employee_goal_plan
+    set published_at = null
+    where id = '33333333-3333-4333-8333-00000000000a';
+    raise exception 'ASSERTION FAILED: forged static unpublish token should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: service_role raw reversals and forged static GUC flags raise 55000';
+end $$;
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+begin
+  begin
+    perform public.unpublish_employee_goal_plan(
+      '33333333-3333-4333-8333-00000000000a',
+      'employee must not reverse publication'
+    );
+    raise exception 'ASSERTION FAILED: non-HR unpublish should fail';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  begin
+    perform public.unfinalize_calibration_session(
+      '44444444-4444-4444-8444-000000000001',
+      'employee must not reopen calibration'
+    );
+    raise exception 'ASSERTION FAILED: non-HR unfinalize should fail';
+  exception
+    when sqlstate '42501' then
+      null;
+  end;
+
+  raise notice 'PASS: both reversal functions reject non-HR callers with 42501';
+end $$;
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_message text;
+begin
+  begin
+    perform public.unfinalize_calibration_session(
+      '44444444-4444-4444-8444-000000000001',
+      'published participants still block reopening'
+    );
+    raise exception 'ASSERTION FAILED: published participant should block unfinalize';
+  exception
+    when sqlstate '55000' then
+      get stacked diagnostics v_message = message_text;
+      if v_message not like '%1 published participant%' then
+        raise exception 'Unfinalize blocker message did not name participant count: %', v_message;
+      end if;
+  end;
+
+  raise notice 'PASS: unfinalize reports the published participant count with 55000';
+end $$;
+
+do $$
+begin
+  begin
+    perform public.unpublish_employee_goal_plan(
+      '33333333-3333-4333-8333-00000000000a', ''
+    );
+    raise exception 'ASSERTION FAILED: blank unpublish reason should fail';
+  exception
+    when sqlstate '23514' then
+      null;
+  end;
+
+  begin
+    perform public.unpublish_employee_goal_plan(
+      '33333333-3333-4333-8333-00000000000a', 'short'
+    );
+    raise exception 'ASSERTION FAILED: too-short unpublish reason should fail';
+  exception
+    when sqlstate '23514' then
+      null;
+  end;
+
+  raise notice 'PASS: blank and too-short unpublish reasons raise 23514';
+end $$;
+
+do $$
+declare
+  v_published_at timestamptz;
+  v_score numeric;
+  v_band_id uuid;
+  v_session_status public.calibration_session_status;
+  v_reversed_at timestamptz;
+  v_reversed_by uuid;
+  v_reason text;
+begin
+  perform public.unpublish_employee_goal_plan(
+    '33333333-3333-4333-8333-00000000000a',
+    'published in error'
+  );
+
+  select published_at, last_unpublished_at, last_unpublished_by, last_unpublish_reason
+  into v_published_at, v_reversed_at, v_reversed_by, v_reason
+  from public.employee_goal_plan
+  where id = '33333333-3333-4333-8333-00000000000a';
+
+  select calibrated_score, band_id
+  into v_score, v_band_id
+  from public.calibration_participant
+  where calibration_session_id = '44444444-4444-4444-8444-000000000001'
+    and employee_goal_plan_id = '33333333-3333-4333-8333-00000000000a';
+
+  select status into v_session_status
+  from public.calibration_session
+  where id = '44444444-4444-4444-8444-000000000001';
+
+  if v_published_at is not null
+     or v_score <> 3.200
+     or v_band_id <> '55555555-5555-4555-8555-000000000002'::uuid
+     or v_session_status <> 'finalized'::public.calibration_session_status
+     or v_reversed_at is null
+     or v_reversed_by <> '11111111-1111-4111-8111-000000000001'::uuid
+     or v_reason <> 'published in error' then
+    raise exception 'Unexpected post-unpublish state: published %, score %, band %, session %, metadata %/%/%',
+      v_published_at, v_score, v_band_id, v_session_status,
+      v_reversed_at, v_reversed_by, v_reason;
+  end if;
+
+  raise notice 'PASS: unpublish preserves calibration/session state and atomically records metadata';
+end $$;
+
+do $$
+declare
+  v_rows integer;
+begin
+  select count(*) into v_rows
+  from public.comp_export_rows('22222222-2222-4222-8222-000000000001') as export
+  where export.employee_id = '11111111-1111-4111-8111-000000000004';
+
+  if v_rows <> 0 then
+    raise exception 'Unpublished Dara still appears in compensation export';
+  end if;
+
+  raise notice 'PASS: unpublished plan disappears from comp_export_rows';
+end $$;
+
+do $$
+begin
+  perform public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000a');
+  if not exists (
+    select 1 from public.employee_goal_plan
+    where id = '33333333-3333-4333-8333-00000000000a'
+      and published_at is not null
+  ) then
+    raise exception 'Re-publish while finalized did not persist';
+  end if;
+  raise notice 'PASS: an unpublished plan can be re-published while its session remains finalized';
+end $$;
+
+do $$
+begin
+  perform public.unpublish_employee_goal_plan(
+    '33333333-3333-4333-8333-00000000000a',
+    'prepare session for rescoring'
+  );
+
+  begin
+    perform public.unfinalize_calibration_session(
+      '44444444-4444-4444-8444-000000000001', 'short'
+    );
+    raise exception 'ASSERTION FAILED: too-short unfinalize reason should fail';
+  exception
+    when sqlstate '23514' then
+      null;
+  end;
+
+  perform public.unfinalize_calibration_session(
+    '44444444-4444-4444-8444-000000000001',
+    're-score after publication error'
+  );
+
+  if not exists (
+    select 1
+    from public.calibration_session
+    where id = '44444444-4444-4444-8444-000000000001'
+      and status = 'open'
+      and last_unfinalized_at is not null
+      and last_unfinalized_by = '11111111-1111-4111-8111-000000000001'
+      and last_unfinalize_reason = 're-score after publication error'
+  ) then
+    raise exception 'Unfinalize did not set open status and complete metadata';
+  end if;
+
+  raise notice 'PASS: unfinalize returns the empty-of-publications session to open with metadata';
+end $$;
+
+do $$
+declare
+  v_participant_id uuid;
+begin
+  select id into v_participant_id
+  from public.calibration_participant
+  where calibration_session_id = '44444444-4444-4444-8444-000000000001'
+    and employee_goal_plan_id = '33333333-3333-4333-8333-00000000000a';
+
+  perform public.adjust_calibration_participant(v_participant_id, 3.300, 'reopened adjustment');
+
+  if not exists (
+    select 1 from public.calibration_participant
+    where id = v_participant_id and calibrated_score = 3.300
+  ) then
+    raise exception 'Adjustment after unfinalize did not persist';
+  end if;
+
+  begin
+    perform public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000a');
+    raise exception 'ASSERTION FAILED: publish in reopened session should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: reopened participant is editable and publishing while open stays blocked';
+end $$;
+
+set local role service_role;
+do $$
+begin
+  begin
+    delete from public.calibration_band
+    where id = '55555555-5555-4555-8555-000000000002';
+    raise exception 'ASSERTION FAILED: assigned band delete in open session should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: service_role cannot delete an assigned band from an open session';
+end $$;
+
+set local role authenticated;
+do $$
+declare
+  v_participant_id uuid;
+begin
+  select id into v_participant_id
+  from public.calibration_participant
+  where calibration_session_id = '44444444-4444-4444-8444-000000000001'
+    and employee_goal_plan_id = '33333333-3333-4333-8333-00000000000a';
+
+  perform public.adjust_calibration_participant(v_participant_id, 3.200, 'restore seeded score');
+  perform public.finalize_calibration_session('44444444-4444-4444-8444-000000000001');
+end $$;
+
+set local role service_role;
+do $$
+begin
+  begin
+    delete from public.calibration_band
+    where id = '55555555-5555-4555-8555-000000000002';
+    raise exception 'ASSERTION FAILED: assigned band delete in finalized session should fail';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: service_role cannot delete an assigned band from a finalized session';
+end $$;
+
+set local role authenticated;
+do $$
+begin
+  perform public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000a');
+
+  if not exists (
+    select 1
+    from public.calibration_session as cs
+    join public.calibration_participant as cp
+      on cp.calibration_session_id = cs.id
+    join public.employee_goal_plan as egp
+      on egp.id = cp.employee_goal_plan_id
+    where cs.id = '44444444-4444-4444-8444-000000000001'
+      and cs.status = 'finalized'
+      and cp.calibrated_score = 3.200
+      and cp.band_id = '55555555-5555-4555-8555-000000000002'
+      and egp.published_at is not null
+  ) then
+    raise exception 'Calibration round trip did not restore the seeded functional state';
+  end if;
+
+  raise notice 'PASS: re-finalize and re-publish restore the seeded functional state';
+end $$;
+
+set local role service_role;
+do $$
+declare
+  v_session_id uuid;
+  v_band_id uuid;
+begin
+  v_session_id := public.create_calibration_session_with_bands(
+    'Unreferenced band delete fixture',
+    '22222222-2222-4222-8222-000000000001',
+    '[{"label":"Temporary","min_score":0.000,"max_score":5.001,"sort_order":1}]'::jsonb
+  );
+
+  select id into v_band_id
+  from public.calibration_band
+  where calibration_session_id = v_session_id;
+
+  delete from public.calibration_band where id = v_band_id;
+
+  if exists (select 1 from public.calibration_band where id = v_band_id) then
+    raise exception 'Unreferenced calibration band was not deleted';
+  end if;
+
+  raise notice 'PASS: an unreferenced calibration band deletes successfully';
+end $$;
+rollback;
+
+-- The published-plan rejoin guard is pinned separately with Vuthy's fixture
+-- so its exact existing message cannot drift while adding reversal support.
+begin;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_session_id uuid;
+  v_message text;
+begin
+  v_session_id := public.create_calibration_session_with_bands(
+    'Vuthy published rejoin fixture',
+    '22222222-2222-4222-8222-000000000001',
+    '[{"label":"All scores","min_score":0.000,"max_score":5.001,"sort_order":1}]'::jsonb
+  );
+
+  perform public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000e');
+
+  begin
+    perform public.add_plan_to_calibration_session(
+      v_session_id,
+      '33333333-3333-4333-8333-00000000000e'
+    );
+    raise exception 'ASSERTION FAILED: published Vuthy plan should not rejoin calibration';
+  exception
+    when sqlstate '55000' then
+      get stacked diagnostics v_message = message_text;
+      if v_message <> 'Published employee goal plan 33333333-3333-4333-8333-00000000000e cannot be recalibrated without an unpublish step' then
+        raise exception 'Published-plan rejection message changed: %', v_message;
+      end if;
+  end;
+
+  raise notice 'PASS: Vuthy published-plan rejoin retains the exact 55000 message';
+end $$;
+rollback;
+
+begin;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+begin
+  begin
+    insert into public.calibration_session (
+      id, review_cycle_id, name, status
+    ) values (
+      'f2200000-0000-4000-8000-000000000001',
+      '22222222-2222-4222-8222-000000000001',
+      'Illegal finalized insert fixture',
+      'finalized'
+    );
+    raise exception 'ASSERTION FAILED: calibration session insert must start open';
+  exception
+    when sqlstate '55000' then
+      null;
+  end;
+
+  raise notice 'PASS: direct calibration_session INSERT with finalized status raises 55000';
+end $$;
+rollback;
+
+\echo 'ALL 115 CHECKS PASSED'
