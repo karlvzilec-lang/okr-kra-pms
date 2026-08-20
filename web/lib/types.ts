@@ -145,6 +145,18 @@ export type ReviewSummary = {
   objectives: Objective[];
 };
 
+/** One published plan returned by the HR-only comp_export_rows RPC. */
+export type CompExportRow = {
+  employee_id: string;
+  full_name: string;
+  email: string;
+  manager_full_name: string | null;
+  overall_rating_scale_max: number;
+  final_score: number | null;
+  band_label: string | null;
+  published_at: string;
+};
+
 // ---------------------------------------------------------------------------
 // HR administration / cascade + alignment links (additive - every type above
 // is what /review, /goals, /objectives, /calibration and /review-cycles
