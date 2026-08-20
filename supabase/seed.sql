@@ -623,3 +623,128 @@ begin
     perform public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000a');
   end if;
 end $$;
+
+-- ===========================================================================
+-- PAST REVIEW-CYCLE FIXTURE — Dara Sok's FY2025 history
+--
+-- Purpose: prove an employee can open a review cycle that has already ended
+-- and read their own historical ratings. Everything above this line is left
+-- untouched; this block is additive, fixed-UUID and re-runnable like the rest.
+--
+-- Deliberately DIFFERENT in shape from Dara's FY2026 plan rather than a second
+-- copy of it. FY2026 is calibrated and published, so it already covers the
+-- "final score after moderation" path. FY2025 stops at manager_reviewed and is
+-- never published, which is the case the published fixture cannot exercise:
+-- an employee seeing their own manager rating from a closed cycle that never
+-- went through calibration at all.
+--
+-- Vuthy Long deliberately gets NO FY2025 row. He is the negative fixture: a
+-- cycle he never participated in must stay invisible to him.
+--
+-- Hand-check of the Average Method rollup (one category at 100%, scale max 5):
+--
+--   SELF     4.0 (weight 60) and 5.0 (weight 40)
+--     Category = (0.8*60 + 1.0*40) / 100 = 88/100 = 0.88
+--     Overall  = 0.88 * 100/100          = 0.88
+--     Rescaled onto scale max 5          = 0.88 * 5 = 4.400
+--
+--   MANAGER  4.0 (weight 60) and 4.0 (weight 40)
+--     Category = (0.8*60 + 0.8*40) / 100 = 80/100 = 0.80
+--     Overall  = 0.80 * 100/100          = 0.80
+--     Rescaled onto scale max 5          = 0.80 * 5 = 4.000
+--
+-- goal_plan_rating is NOT inserted directly here, same as every other plan in
+-- this file: it is produced by calling the real compute_goal_plan_rating, so
+-- the numbers above are checked by the database rather than asserted by hand.
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- review_cycle — inserted as draft and then walked through every real
+-- transition to closed. The lifecycle trigger rejects both a non-draft INSERT
+-- and any status skip, so a past cycle can only be produced by actually
+-- living through the sequence, which is what the guarded updates below do.
+-- ---------------------------------------------------------------------------
+
+insert into public.review_cycle (id, name, start_date, end_date, status)
+values
+  ('22222222-2222-4222-8222-000000000002', 'FY2025 Annual Review', '2025-01-01', '2025-12-31', 'draft')
+on conflict (id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- The plan and its ratings are created while the cycle is still open. The
+-- close happens last, after the rollup has been computed, so the fixture is
+-- built the way a real cycle would have been rather than back-filled into a
+-- frozen one.
+-- ---------------------------------------------------------------------------
+
+insert into public.employee_goal_plan (id, review_cycle_id, employee_id, status, overall_rating_scale_max)
+values
+  ('33333333-3333-4333-8333-000000000010',
+   '22222222-2222-4222-8222-000000000002',
+   '11111111-1111-4111-8111-000000000004',  -- Dara
+   'manager_reviewed',
+   5)
+on conflict (id) do nothing;
+
+-- review_participant is what RLS actually keys off — without these rows the
+-- cycle itself would be invisible to all three of them.
+insert into public.review_participant (employee_goal_plan_id, participant_id, role)
+values
+  ('33333333-3333-4333-8333-000000000010', '11111111-1111-4111-8111-000000000004', 'employee'),
+  ('33333333-3333-4333-8333-000000000010', '11111111-1111-4111-8111-000000000002', 'line_manager'),
+  ('33333333-3333-4333-8333-000000000010', '11111111-1111-4111-8111-000000000001', 'hr_admin')
+on conflict (employee_goal_plan_id, participant_id, role) do nothing;
+
+insert into public.kra_category (id, employee_goal_plan_id, name, description, weight)
+values
+  ('44444444-4444-4444-8444-000000000010',
+   '33333333-3333-4333-8333-000000000010',
+   'Operational Excellence',
+   'Keeping the money-movement systems correct, reconciled and quiet.',
+   100.00)
+on conflict (id) do nothing;
+
+insert into public.goal (
+  id, kra_category_id, title, description, weight, target_metric, rating_scale_max,
+  self_rating, self_comment, manager_rating, manager_comment
+)
+values
+  ('55555555-5555-4555-8555-000000000010', '44444444-4444-4444-8444-000000000010',
+   'Stabilize payment reconciliation',
+   'Bring the daily reconciliation job to a clean, unattended run.',
+   60.00, 'Zero unexplained breaks for 90 consecutive days', 5,
+   4.00, 'Breaks down to zero from October onward; two manual interventions earlier in the year.',
+   4.00, 'Solid, sustained improvement. The two early interventions were reasonable calls.'),
+
+  ('55555555-5555-4555-8555-000000000011', '44444444-4444-4444-8444-000000000010',
+   'Automate month-end exception reporting',
+   'Replace the hand-built month-end exception spreadsheet with a generated report.',
+   40.00, 'Report generated unattended for two consecutive quarters', 5,
+   5.00, 'Fully automated from Q3; finance stopped asking for the spreadsheet entirely.',
+   4.00, 'Genuinely useful automation. Landed a quarter later than planned.')
+on conflict (id) do nothing;
+
+-- Compute the rollup through the real function, as HR admin (the same GUC
+-- trick the blocks above use). Expected: self 4.400, manager 4.000.
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', false);
+select public.compute_goal_plan_rating('33333333-3333-4333-8333-000000000010', 'self');
+select public.compute_goal_plan_rating('33333333-3333-4333-8333-000000000010', 'manager');
+
+-- ---------------------------------------------------------------------------
+-- Now walk the cycle to closed, one legal step at a time. Each update is
+-- guarded on the current status so a re-run is a no-op instead of a 55000
+-- from re-attempting a transition that already happened.
+--
+-- The plan is left UNPUBLISHED on purpose. It never enters a calibration
+-- session, so there is no final_score to read — only the manager's own
+-- rating, which is exactly the historical case being proven.
+-- ---------------------------------------------------------------------------
+
+update public.review_cycle set status = 'active'
+where id = '22222222-2222-4222-8222-000000000002' and status = 'draft';
+update public.review_cycle set status = 'self_eval'
+where id = '22222222-2222-4222-8222-000000000002' and status = 'active';
+update public.review_cycle set status = 'manager_eval'
+where id = '22222222-2222-4222-8222-000000000002' and status = 'self_eval';
+update public.review_cycle set status = 'closed'
+where id = '22222222-2222-4222-8222-000000000002' and status = 'manager_eval';

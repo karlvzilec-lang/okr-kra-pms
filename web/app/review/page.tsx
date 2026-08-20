@@ -13,10 +13,24 @@ import { KraStatCard, KraStatCardEmpty } from "@/components/kra-stat-card";
 import { ObjectiveCard } from "@/components/objective-card";
 import { isPasswordExpired } from "@/lib/password";
 import { hasAnyDirectReports, loadOwnPlanForCycle } from "@/lib/goal-plan-queries";
+import { loadReviewCycles } from "@/lib/okr-queries";
 import { employeeCanEdit } from "@/lib/goals";
+import { cycleIsClosed } from "@/lib/okr";
+import { CyclePicker } from "@/components/cycles/cycle-picker";
 import type { ReviewSummary } from "@/lib/types";
 
-export default async function ReviewPage() {
+/** The requested cycle id, or null when the param is absent or repeated. */
+function requestedCycleId(raw: string | string[] | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export default async function ReviewPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ cycle?: string | string[] }>;
+}) {
   const supabase = await createClient();
 
   const {
@@ -27,15 +41,25 @@ export default async function ReviewPage() {
     redirect("/login");
   }
 
-  const [{ data: profile }, { data: cycle }] = await Promise.all([
+  const { cycle: cycleParam } = await searchParams;
+
+  // loadReviewCycles is already RLS-scoped: it returns only the cycles this
+  // caller participates in, or every cycle for HR. Picking out of that list
+  // rather than fetching the requested id directly is what makes ?cycle= safe.
+  // An id that isn't in the list simply isn't found, so the page falls back to
+  // the default rather than erroring or confirming that the cycle exists.
+  const [{ data: profile }, cycles] = await Promise.all([
     supabase.from("profiles").select("full_name, is_hr_admin, password_changed_at").eq("id", user.id).single(),
-    supabase
-      .from("review_cycle")
-      .select("id, name, status")
-      .order("start_date", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
+    loadReviewCycles(supabase),
   ]);
+
+  // Same newest-first default as before when nothing is requested, since
+  // loadReviewCycles already orders by start_date descending.
+  const requestedId = requestedCycleId(cycleParam);
+  const cycle =
+    (requestedId ? cycles.find((row) => row.id === requestedId) : undefined) ??
+    cycles[0] ??
+    null;
 
   // Forced rotation: never-changed or older than 60 days blocks access until
   // the user sets a new password that meets the (now stronger) policy.
@@ -49,7 +73,8 @@ export default async function ReviewPage() {
     cycle ? loadOwnPlanForCycle(supabase, cycle.id, user.id) : Promise.resolve(null),
     hasAnyDirectReports(supabase, user.id),
   ]);
-  const canEditOwnPlan = ownPlan ? employeeCanEdit(ownPlan.status) : false;
+  const canEditOwnPlan =
+    ownPlan !== null && !cycleIsClosed(cycle?.status) && employeeCanEdit(ownPlan.status);
 
   let summary: ReviewSummary | null = null;
   let summaryError: string | null = null;
@@ -60,7 +85,7 @@ export default async function ReviewPage() {
         p_review_cycle_id: cycle.id,
         p_employee_id: user.id,
       })
-      .single<{ summary: ReviewSummary }>();
+      .maybeSingle<{ summary: ReviewSummary }>();
 
     if (error) {
       summaryError = error.message;
@@ -153,13 +178,21 @@ export default async function ReviewPage() {
       </header>
 
       <div className="mx-auto w-full max-w-4xl flex-1 px-4 py-10 sm:px-8">
-        <div className="mb-8">
-          <p className="text-sm font-medium" style={{ color: "var(--accent)" }}>
-            {cycle?.name ?? "No active review cycle"}
-          </p>
-          <h1 className="font-heading mt-1 text-2xl font-semibold sm:text-3xl" style={{ color: "var(--foreground)" }}>
-            {profile?.full_name ?? "Your"} review summary
-          </h1>
+        <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium" style={{ color: "var(--accent)" }}>
+              {cycle?.name ?? "No active review cycle"}
+            </p>
+            <h1 className="font-heading mt-1 text-2xl font-semibold sm:text-3xl" style={{ color: "var(--foreground)" }}>
+              {profile?.full_name ?? "Your"} review summary
+            </h1>
+            {cycle && cycleIsClosed(cycle.status) && (
+              <p className="mt-2 max-w-lg text-sm" style={{ color: "var(--muted-foreground)" }}>
+                This cycle is closed. Everything below is a read-only record of how it ended.
+              </p>
+            )}
+          </div>
+          {cycle && <CyclePicker cycles={cycles} selectedId={cycle.id} />}
         </div>
 
         {!cycle && (
@@ -177,7 +210,16 @@ export default async function ReviewPage() {
           </p>
         )}
 
-        {cycle && !summaryError && (
+        {cycle && !summaryError && !summary && (
+          <p
+            className="rounded-2xl border border-dashed p-6 text-sm"
+            style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
+          >
+            You had no goal plan in this review cycle, so there is nothing to show for it.
+          </p>
+        )}
+
+        {cycle && !summaryError && summary && (
           <div className="flex flex-col gap-10">
             <section>
               <h2 className="font-heading mb-3 text-sm font-semibold uppercase tracking-wide" style={{ color: "var(--muted-foreground)" }}>
