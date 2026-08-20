@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { ChartLineUp } from "@phosphor-icons/react/dist/csr/ChartLineUp";
 import { WarningCircle } from "@phosphor-icons/react/dist/csr/WarningCircle";
 import { Eye } from "@phosphor-icons/react/dist/csr/Eye";
@@ -116,6 +117,15 @@ export default function LoginPage() {
                     <Eye size={18} weight="bold" aria-hidden="true" />
                   )}
                 </button>
+              </div>
+              <div className="flex min-h-11 items-center justify-end">
+                <Link
+                  href="/forgot-password"
+                  className="text-sm font-medium transition-colors hover:underline"
+                  style={{ color: "var(--accent)" }}
+                >
+                  Forgot password?
+                </Link>
               </div>
             </div>
 
