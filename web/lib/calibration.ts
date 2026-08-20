@@ -318,7 +318,7 @@ export function previewBandForScore(
  * reason; this mirror exists so HR sees the requirement before submitting
  * rather than after a round trip.
  */
-export const MIN_REVERSAL_REASON_LENGTH = 8;
+export const MIN_REVERSAL_REASON_LENGTH = 10;
 
 /**
  * Validate a reversal reason the way the DB will. Returns null when the reason
