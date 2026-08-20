@@ -48,6 +48,18 @@ export type CalibrationParticipant = {
   facilitator_note: string | null;
   overall_rating_scale_max: number;
   published_at: string | null;
+  /**
+   * Latest-reversal metadata for this participant's plan (migration 0022).
+   *
+   * Written atomically as a triple by unpublish_employee_goal_plan, and
+   * collectively null until the plan has been unpublished at least once.
+   * Deliberately *latest*, not history — a second unpublish overwrites the
+   * first. A generic audit trail is out of scope for this round.
+   */
+  last_unpublished_at: string | null;
+  /** profiles.id of the HR admin who unpublished. */
+  last_unpublished_by: string | null;
+  last_unpublish_reason: string | null;
 };
 
 export type CalibrationSessionDetail = {
@@ -59,6 +71,17 @@ export type CalibrationSessionDetail = {
     review_cycle_name: string | null;
     created_at: string;
     updated_at: string;
+    /**
+     * Latest-reversal metadata for the session (migration 0022). Written
+     * atomically as a triple by unfinalize_calibration_session; collectively
+     * null until the session has been un-finalized at least once. A session
+     * that was un-finalized and then re-finalized keeps this triple — it
+     * describes the most recent reversal, not the current status.
+     */
+    last_unfinalized_at: string | null;
+    /** profiles.id of the HR admin who un-finalized. */
+    last_unfinalized_by: string | null;
+    last_unfinalize_reason: string | null;
   };
   bands: CalibrationBand[];
   participants: CalibrationParticipant[];
@@ -282,6 +305,35 @@ export function previewBandForScore(
   return (
     ordered.find((band) => score >= band.min_score && score < band.max_score) ?? null
   );
+}
+
+// ---------------------------------------------------------------------------
+// Reversal reasons (client-side UX only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum characters a reversal reason must carry. The authoritative rule is
+ * the DB check constraint on unpublish_employee_goal_plan /
+ * unfinalize_calibration_session, which raises 23514 on a blank or too-short
+ * reason; this mirror exists so HR sees the requirement before submitting
+ * rather than after a round trip.
+ */
+export const MIN_REVERSAL_REASON_LENGTH = 8;
+
+/**
+ * Validate a reversal reason the way the DB will. Returns null when the reason
+ * is acceptable, otherwise a readable message. Whitespace-only never passes —
+ * both reversal functions treat a blank reason as 23514.
+ */
+export function reversalReasonError(reason: string): string | null {
+  const trimmed = reason.trim();
+  if (trimmed.length === 0) {
+    return "A reason is required — this is the only record of why the reversal happened.";
+  }
+  if (trimmed.length < MIN_REVERSAL_REASON_LENGTH) {
+    return `Give a bit more detail — at least ${MIN_REVERSAL_REASON_LENGTH} characters.`;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

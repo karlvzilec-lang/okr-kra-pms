@@ -5,12 +5,16 @@ import { useRouter } from "next/navigation";
 import { Plus } from "@phosphor-icons/react/dist/csr/Plus";
 import { LockSimple } from "@phosphor-icons/react/dist/csr/LockSimple";
 import { PaperPlaneTilt } from "@phosphor-icons/react/dist/csr/PaperPlaneTilt";
+import { LockSimpleOpen } from "@phosphor-icons/react/dist/csr/LockSimpleOpen";
+import { ArrowUUpLeft } from "@phosphor-icons/react/dist/csr/ArrowUUpLeft";
 import { WarningCircle } from "@phosphor-icons/react/dist/csr/WarningCircle";
 import { createClient } from "@/lib/supabase/client";
 import { AdjustModal } from "@/components/calibration/adjust-modal";
 import { AddParticipantModal } from "@/components/calibration/add-participant-modal";
 import { ParticipantCard } from "@/components/calibration/participant-card";
 import { SessionStatusPill } from "@/components/calibration/session-status-pill";
+import { UnfinalizeModal } from "@/components/calibration/unfinalize-modal";
+import { UnpublishModal } from "@/components/calibration/unpublish-modal";
 import {
   usePointerDrag,
   DROP_TARGET_ATTR,
@@ -46,8 +50,10 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
 
   const [adjustTarget, setAdjustTarget] = useState<AdjustTarget | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [unpublishTarget, setUnpublishTarget] = useState<CalibrationParticipant | null>(null);
+  const [unfinalizeOpen, setUnfinalizeOpen] = useState(false);
   const [pendingAction, setPendingAction] = useState<
-    "adjust" | "add" | "finalize" | "publish" | null
+    "adjust" | "add" | "finalize" | "publish" | "unpublish" | "unfinalize" | null
   >(null);
   const [modalError, setModalError] = useState<string | null>(null);
   const [boardError, setBoardError] = useState<string | null>(null);
@@ -65,6 +71,11 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
 
   const adjustedCount = detail.participants.filter((p) => scoreDelta(p) !== null).length;
   const unpublished = detail.participants.filter((p) => p.published_at === null);
+  const published = detail.participants.filter((p) => p.published_at !== null);
+  // Un-finalize is blocked while anything is still published — the DB rejects it
+  // with 55000. The control stays visible and explains itself rather than
+  // vanishing, so HR can see the unpublish-first path instead of guessing.
+  const unfinalizeBlocked = published.length > 0;
 
   function refresh() {
     startRefresh(() => router.refresh());
@@ -153,6 +164,49 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
       return;
     }
 
+    refresh();
+  }
+
+  async function handleUnpublish(reason: string) {
+    if (!unpublishTarget) return;
+    setPendingAction("unpublish");
+    setModalError(null);
+
+    const supabase = createClient();
+    const { error } = await supabase.rpc("unpublish_employee_goal_plan", {
+      p_plan_id: unpublishTarget.employee_goal_plan_id,
+      p_reason: reason,
+    });
+
+    setPendingAction(null);
+
+    if (error) {
+      setModalError(calibrationErrorMessage(error));
+      return;
+    }
+
+    setUnpublishTarget(null);
+    refresh();
+  }
+
+  async function handleUnfinalize(reason: string) {
+    setPendingAction("unfinalize");
+    setModalError(null);
+
+    const supabase = createClient();
+    const { error } = await supabase.rpc("unfinalize_calibration_session", {
+      p_session_id: detail.session.id,
+      p_reason: reason,
+    });
+
+    setPendingAction(null);
+
+    if (error) {
+      setModalError(calibrationErrorMessage(error));
+      return;
+    }
+
+    setUnfinalizeOpen(false);
     refresh();
   }
 
@@ -269,17 +323,42 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
       </div>
 
       {finalized && (
-        <p
-          className="rounded-2xl border p-4 text-sm"
-          style={{
-            borderColor: "var(--border)",
-            backgroundColor: "var(--muted)",
-            color: "var(--muted-foreground)",
-          }}
+        <div
+          className="flex flex-col gap-3 rounded-2xl border p-4"
+          style={{ borderColor: "var(--border)", backgroundColor: "var(--muted)" }}
         >
-          This session is finalized. Scores are frozen and can no longer be adjusted. Publish each
-          plan below to make its calibrated score visible to the employee.
-        </p>
+          <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
+            This session is finalized. Scores are frozen and can no longer be adjusted. Publish each
+            plan below to make its calibrated score visible to the employee.
+          </p>
+
+          <div className="flex flex-col gap-1.5">
+            <button
+              type="button"
+              disabled={pendingAction !== null || unfinalizeBlocked}
+              aria-describedby={unfinalizeBlocked ? "unfinalize-blocked" : undefined}
+              onClick={() => {
+                setModalError(null);
+                setUnfinalizeOpen(true);
+              }}
+              className="inline-flex min-h-11 w-fit items-center gap-1.5 rounded-lg border px-4 text-sm font-medium transition-colors hover:bg-[var(--card)] disabled:opacity-50 disabled:hover:bg-transparent cursor-pointer disabled:cursor-default"
+              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+            >
+              <LockSimpleOpen size={16} weight="bold" aria-hidden="true" />
+              Un-finalize session
+            </button>
+
+            {unfinalizeBlocked && (
+              // Disabled-with-explanation, not hidden: HR needs to see the route
+              // out (unpublish first), not just find the control missing.
+              <p id="unfinalize-blocked" className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+                {published.length} {published.length === 1 ? "plan is" : "plans are"} still
+                published. Unpublish {published.length === 1 ? "it" : "them"} below before reopening
+                this session — an open session can never hold a published plan.
+              </p>
+            )}
+          </div>
+        </div>
       )}
 
       {boardError && (
@@ -307,8 +386,9 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
           <p className="flex items-start gap-2 text-sm" style={{ color: "var(--foreground)" }}>
             <WarningCircle size={16} weight="bold" className="mt-0.5 shrink-0" aria-hidden="true" />
             <span>
-              Finalizing freezes every score in this session permanently — there is no way to reopen
-              it from this screen. Publishing is only possible after finalizing.
+              Finalizing freezes every score in this session. Publishing is only possible after
+              finalizing. This is reversible — an HR admin can un-finalize the session later, with a
+              recorded reason, once nothing in it is published.
             </span>
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
@@ -405,21 +485,42 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
                             startDrag(event, participant.id, participant.employee_full_name)
                           }
                         />
-                        {finalized && participant.published_at === null && (
-                          <button
-                            type="button"
-                            disabled={pendingAction !== null}
-                            onClick={() => handlePublish(participant.employee_goal_plan_id)}
-                            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg px-3 text-sm font-semibold transition-[transform,opacity] active:scale-[0.98] disabled:opacity-60 cursor-pointer"
-                            style={{
-                              backgroundColor: "var(--accent)",
-                              color: "var(--accent-foreground)",
-                            }}
-                          >
-                            <PaperPlaneTilt size={14} weight="bold" aria-hidden="true" />
-                            Publish
-                          </button>
-                        )}
+                        {finalized &&
+                          (participant.published_at === null ? (
+                            <button
+                              type="button"
+                              disabled={pendingAction !== null}
+                              onClick={() => handlePublish(participant.employee_goal_plan_id)}
+                              className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg px-3 text-sm font-semibold transition-[transform,opacity] active:scale-[0.98] disabled:opacity-60 cursor-pointer"
+                              style={{
+                                backgroundColor: "var(--accent)",
+                                color: "var(--accent-foreground)",
+                              }}
+                            >
+                              <PaperPlaneTilt size={14} weight="bold" aria-hidden="true" />
+                              Publish
+                            </button>
+                          ) : (
+                            // Unpublish takes over the Publish button's slot once
+                            // the plan is live. Unpublishing works whether the
+                            // session is open or finalized, but it's only ever
+                            // reachable from here, and a plan can only be
+                            // published from a finalized session in the first
+                            // place.
+                            <button
+                              type="button"
+                              disabled={pendingAction !== null}
+                              onClick={() => {
+                                setModalError(null);
+                                setUnpublishTarget(participant);
+                              }}
+                              className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg border px-3 text-sm font-medium transition-colors hover:bg-[var(--muted)] disabled:opacity-60 disabled:hover:bg-transparent cursor-pointer disabled:cursor-default"
+                              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+                            >
+                              <ArrowUUpLeft size={14} weight="bold" aria-hidden="true" />
+                              Unpublish
+                            </button>
+                          ))}
                       </div>
                     ))
                   )}
@@ -480,6 +581,33 @@ export function CalibrationBoard({ detail }: { detail: CalibrationSessionDetail 
             // the facilitator cancels instead of saving, that "confirm the
             // proposed score" text would otherwise linger and mislead.
             clearOutcome();
+          }}
+        />
+      )}
+
+      {unpublishTarget && (
+        <UnpublishModal
+          participant={unpublishTarget}
+          pending={pendingAction === "unpublish"}
+          error={modalError}
+          onSubmit={handleUnpublish}
+          onClose={() => {
+            setUnpublishTarget(null);
+            setModalError(null);
+          }}
+        />
+      )}
+
+      {unfinalizeOpen && (
+        <UnfinalizeModal
+          sessionName={detail.session.name}
+          participantCount={detail.participants.length}
+          pending={pendingAction === "unfinalize"}
+          error={modalError}
+          onSubmit={handleUnfinalize}
+          onClose={() => {
+            setUnfinalizeOpen(false);
+            setModalError(null);
           }}
         />
       )}
