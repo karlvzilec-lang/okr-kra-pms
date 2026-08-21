@@ -181,7 +181,12 @@ export async function loadManagerReportPage(
   const { data, count } = await supabase
     .from("employee_goal_plan")
     .select(
-      "id, status, employee_id, review_cycle_id, profiles!inner(full_name), " +
+      // profiles:employee_id, not a bare profiles!inner: employee_goal_plan
+      // has carried a second FK to profiles since 0022 (last_unpublished_by),
+      // so an undisambiguated embed is ambiguous and PGRST201s the whole
+      // query - which silently emptied this page for every manager since
+      // 0022 shipped, since the caught error path here also drops it.
+      "id, status, employee_id, review_cycle_id, profiles:employee_id!inner(full_name), " +
         "review_cycle(name, status), kra_category(goal(manager_rating)), " +
         "review_participant!inner(participant_id, role)",
       { count: "exact" },

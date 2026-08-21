@@ -203,14 +203,26 @@ type RawAdminPlanRow = {
     | null;
 };
 
-/** Every goal plan visible to the caller, with whose it is and which cycle. */
+/**
+ * Every goal plan visible to the caller, with whose it is and which cycle.
+ *
+ * The `profiles` embed must go through the `employee_id` column explicitly
+ * (`profiles:employee_id(...)`, the same bare column-name form used for
+ * `manager:manager_id` above): `employee_goal_plan` has carried a second FK to
+ * `profiles` since 0022 added `last_unpublished_by`, so a bare `profiles(...)`
+ * embed is ambiguous and PostgREST rejects the whole query with PGRST201. That
+ * error was previously discarded silently (`const { data } = await ...`),
+ * which made every plan on this page vanish - matrix-scope grants have been
+ * effectively unusable since 0022 shipped, since the grant form has no plans
+ * to offer once loadAdminPlans always returns empty.
+ */
 export async function loadAdminPlans(
   supabase: SupabaseClient,
 ): Promise<AdminPlanSummary[]> {
   const { data } = await supabase
     .from("employee_goal_plan")
     .select(
-      "id, status, employee_id, review_cycle_id, profiles(full_name), review_cycle(name, status)",
+      "id, status, employee_id, review_cycle_id, profiles:employee_id(full_name), review_cycle(name, status)",
     );
 
   return ((data ?? []) as unknown as RawAdminPlanRow[])
@@ -405,9 +417,14 @@ type RawLinkableGoalRow = Pick<
     | null;
 };
 
+// employee_goal_plan's profiles embed is disambiguated the same way and for
+// the same reason as loadAdminPlans above: two FKs to profiles since 0022,
+// so a bare profiles(...) here is ambiguous and PGRST201s the whole query -
+// which silently emptied both the cascade-source and alignment-parent
+// pickers (loadAlignmentParents calls this same function) since 0022 shipped.
 const LINKABLE_GOAL_SELECT =
   "id, title, description, target_metric, rating_scale_max, weight, " +
-  "kra_category(name, employee_goal_plan(employee_id, profiles(full_name)))";
+  "kra_category(name, employee_goal_plan(employee_id, profiles:employee_id(full_name)))";
 
 function shapeLinkableGoal(row: RawLinkableGoalRow): LinkableGoal {
   const category = firstOf(row.kra_category);

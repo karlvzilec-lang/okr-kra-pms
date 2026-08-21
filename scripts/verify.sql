@@ -3665,6 +3665,52 @@ end $$;
 rollback;
 
 -- ============================================================================
+-- Admin UI Gate 1 (21a): a non-HR caller cannot revoke a scope grant, and HR
+-- can. RLS coverage for revokeMatrixScopeAction's DELETE, added when the
+-- matrix-scopes page gained a revoke control -- previously only INSERT into
+-- review_participant_scope was ever exercised through the app, so the DELETE
+-- branch of review_participant_scope_hr_all's `for all` policy had no
+-- dedicated assertion of its own.
+-- ============================================================================
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000009', true);
+do $$
+declare
+  v_rows integer;
+begin
+  delete from public.review_participant_scope
+  where id = '99999999-9999-4999-8999-000000000001';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 0 then
+    raise exception 'Expected non-HR scope delete to affect 0 rows, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: non-HR review_participant_scope delete is a silent zero-row no-op';
+end $$;
+rollback;
+
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows integer;
+begin
+  delete from public.review_participant_scope
+  where id = '99999999-9999-4999-8999-000000000001';
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 1 then
+    raise exception 'Expected HR scope delete to affect 1 row, got %', v_rows;
+  end if;
+
+  raise notice 'PASS: HR review_participant_scope delete succeeds';
+end $$;
+rollback;
+
+-- ============================================================================
 -- Admin UI Gate 1 (22): non-HR goal_cascade UPDATE is a zero-row RLS no-op.
 -- ============================================================================
 begin;
@@ -4395,4 +4441,4 @@ begin
 end $$;
 rollback;
 
-\echo 'ALL 120 CHECKS PASSED'
+\echo 'ALL 121 CHECKS PASSED'

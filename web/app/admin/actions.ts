@@ -533,3 +533,48 @@ export async function grantMatrixScopesAction(
     message: `${scopes.length} ${scopes.length === 1 ? "scope" : "scopes"} granted.`,
   };
 }
+
+/**
+ * Revoke one previously-granted matrix scope.
+ *
+ * review_participant_scope_hr_all already lets an HR-authenticated caller
+ * delete this row directly under RLS with no extra plumbing, but every other
+ * write in this file re-verifies HR status server-side before touching the
+ * database anyway (getAuthorizedAdminClients does this before constructing
+ * either client) rather than leaning on RLS alone, and this follows the same
+ * pattern for consistency and defense in depth.
+ *
+ * Deliberately does not also delete the parent review_participant row: a
+ * matrix manager may hold more than one scope on the same plan, or scopes
+ * across more than one plan, and this action only ever removes the one grant
+ * the caller pointed at. A participant left with zero scopes still shows up
+ * as a matrix manager with nothing to act on, which is a visible, honest
+ * state rather than a silently different one - and granting them a scope
+ * again reuses the same participant row via the same upsert grantMatrixScopesAction
+ * already does.
+ */
+export async function revokeMatrixScopeAction(scopeId: string): Promise<AdminActionResult> {
+  if (typeof scopeId !== "string" || !UUID_PATTERN.test(scopeId)) {
+    return failure("That scope grant no longer exists.");
+  }
+
+  let clients: Awaited<ReturnType<typeof getAuthorizedAdminClients>>;
+  try {
+    clients = await getAuthorizedAdminClients();
+  } catch (error) {
+    return authorizationFailure(error);
+  }
+
+  const { error } = await clients.authenticatedClient
+    .from("review_participant_scope")
+    .delete()
+    .eq("id", scopeId);
+
+  if (error) {
+    return failure("Couldn't revoke that scope. Try again.");
+  }
+
+  revalidatePath("/admin/matrix-scopes");
+
+  return { ok: true, message: "Access revoked." };
+}

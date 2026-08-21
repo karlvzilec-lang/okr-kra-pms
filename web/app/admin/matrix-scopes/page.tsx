@@ -2,6 +2,7 @@ import Link from "next/link";
 import { ArrowLeft } from "@phosphor-icons/react/dist/ssr/ArrowLeft";
 import { createClient } from "@/lib/supabase/server";
 import { ScopeGrantForm } from "@/components/admin/scope-grant-form";
+import { RevokeScopeButton } from "@/components/admin/revoke-scope-button";
 import { Pagination } from "@/components/pagination";
 import { SCOPE_TYPE_LABEL } from "@/lib/admin";
 import { parsePageParam } from "@/lib/pagination";
@@ -135,15 +136,18 @@ export default async function MatrixScopesPage({
                     >
                       {grant.participant_name}
                     </span>
-                    <span
-                      className="rounded-full px-2 py-0.5 text-xs font-medium"
-                      style={{
-                        backgroundColor: "var(--muted)",
-                        color: "var(--muted-foreground)",
-                      }}
-                    >
-                      {SCOPE_TYPE_LABEL[grant.scope_type]}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="rounded-full px-2 py-0.5 text-xs font-medium"
+                        style={{
+                          backgroundColor: "var(--muted)",
+                          color: "var(--muted-foreground)",
+                        }}
+                      >
+                        {SCOPE_TYPE_LABEL[grant.scope_type]}
+                      </span>
+                      <RevokeScopeButton scopeId={grant.id} />
+                    </div>
                   </div>
                   <p className="mt-1 text-sm" style={{ color: "var(--muted-foreground)" }}>
                     {labelByScopeId.get(grant.scope_id) ?? "A section you can no longer see"}
