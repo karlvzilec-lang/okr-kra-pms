@@ -22,6 +22,11 @@ export const PASSWORD_ROTATION_DAYS = 60;
 export function isPasswordExpired(passwordChangedAt: string | null): boolean {
   if (!passwordChangedAt) return true;
   const changed = new Date(passwordChangedAt).getTime();
+  // An unparseable timestamp must fail closed like the null case above, not
+  // fall through the age comparison: NaN < anything is always false, which
+  // would otherwise read a garbage value as "not expired" instead of forcing
+  // rotation.
+  if (Number.isNaN(changed)) return true;
   const ageMs = Date.now() - changed;
   return ageMs > PASSWORD_ROTATION_DAYS * 24 * 60 * 60 * 1000;
 }

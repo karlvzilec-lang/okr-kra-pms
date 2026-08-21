@@ -69,9 +69,10 @@ test("isPasswordExpired accepts a fresh password and rejects a long-stale one", 
 });
 
 test("isPasswordExpired fails closed on an unparseable timestamp", () => {
-  // NaN comparisons are always false, so a garbage date currently reads as
-  // NOT expired. Pinning the real behaviour so a change here is deliberate.
-  assert.equal(isPasswordExpired("not-a-date"), false);
+  // NaN comparisons are always false, so a garbage date would otherwise slip
+  // past the age check and read as NOT expired. isPasswordExpired guards
+  // this explicitly so a malformed value forces rotation, same as null.
+  assert.equal(isPasswordExpired("not-a-date"), true);
 });
 
 test("PASSWORD_ROTATION_DAYS is the single source of the 60-day policy", () => {
