@@ -66,5 +66,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Between Lint and Build on purpose: a broken assertion fails in seconds
+      # rather than after a full Next.js production build.
+      - name: Test
+        run: npm test
+
       - name: Build
         run: npm run build
