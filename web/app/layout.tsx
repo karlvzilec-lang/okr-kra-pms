@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Lexend, Source_Sans_3, IBM_Plex_Mono } from "next/font/google";
+import { connection } from "next/server";
 import "./globals.css";
 
 const lexend = Lexend({
@@ -25,7 +26,15 @@ export const metadata: Metadata = {
   description: "KRA and OKR review summary for one employee cycle.",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  // The CSP in `proxy.ts` carries a per-request nonce, and Next only stamps
+  // `nonce=` onto its <script> tags when a page is rendered per request.
+  // Statically prerendered pages are built without any request, so their HTML
+  // has no nonce and `'strict-dynamic'` would block every script on them.
+  // Opting the root layout into per-request rendering covers the whole app at
+  // once instead of route by route.
+  await connection();
+
   return (
     <html
       lang="en"

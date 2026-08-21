@@ -1,10 +1,11 @@
 import type { NextConfig } from "next";
 
-// Security headers. No CSP here on purpose: a strict CSP under Turbopack dev
-// (HMR websocket, inline dev overlays) is easy to get subtly wrong and easy
-// to silently break without noticing; the headers below are the
-// high-confidence wins that don't risk breaking the dev server, and are a
-// clear next step to layer on before a production deploy.
+// Security headers. The Content-Security-Policy is deliberately NOT here: it
+// needs a fresh per-request nonce, which a static header table cannot
+// express, so it is set in `proxy.ts` instead. The headers below are static
+// and apply to every response, including the asset paths `proxy.ts`'s matcher
+// skips. `X-Frame-Options: DENY` intentionally overlaps `frame-ancestors
+// 'none'` in that CSP, as defense in depth for older clients.
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "X-Frame-Options", value: "DENY" },
