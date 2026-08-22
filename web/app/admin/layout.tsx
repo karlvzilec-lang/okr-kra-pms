@@ -4,6 +4,7 @@ import { ChartLineUp } from "@phosphor-icons/react/dist/ssr/ChartLineUp";
 import { Users } from "@phosphor-icons/react/dist/ssr/Users";
 import { ShieldCheck } from "@phosphor-icons/react/dist/ssr/ShieldCheck";
 import { FileCsv } from "@phosphor-icons/react/dist/ssr/FileCsv";
+import { ClockCounterClockwise } from "@phosphor-icons/react/dist/ssr/ClockCounterClockwise";
 import { createClient } from "@/lib/supabase/server";
 import { LogoutButton } from "@/components/logout-button";
 import { isPasswordExpired } from "@/lib/password";
@@ -117,6 +118,14 @@ function AdminHeader({ showNav }: { showNav: boolean }) {
             >
               <FileCsv size={16} weight="bold" aria-hidden="true" />
               Comp export
+            </Link>
+            <Link
+              href="/admin/activity"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-4 text-sm font-medium transition-colors hover:bg-[var(--muted)]"
+              style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+            >
+              <ClockCounterClockwise size={16} weight="bold" aria-hidden="true" />
+              Activity
             </Link>
           </>
         )}
