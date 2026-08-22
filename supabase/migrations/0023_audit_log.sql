@@ -56,7 +56,13 @@ end $$;
 
 create table if not exists public.audit_log (
   id           uuid primary key default gen_random_uuid(),
-  occurred_at  timestamptz not null default now(),
+  -- clock_timestamp(), NOT now(). now() is the TRANSACTION start time, so every
+  -- event written in one transaction would share a timestamp exactly, and since
+  -- id is a random uuid the tiebreaker below would then order them arbitrarily
+  -- rather than chronologically. Two reversals of the same plan in one request,
+  -- or a manager change and an HR-admin change from one form submit, must read
+  -- back in the order they happened.
+  occurred_at  timestamptz not null default clock_timestamp(),
   event_type   audit_event_type not null,
 
   -- Nullable per ruling point 3. actor_name always renders something.
@@ -180,15 +186,23 @@ security definer
 set search_path = ''
 as $$
 declare
-  v_actor_id   uuid := coalesce(p_actor_id, auth.uid());
+  v_claimed_id uuid := coalesce(p_actor_id, auth.uid());
+  v_actor_id   uuid;
   v_actor_name text;
 begin
   -- Name is snapshotted, never joined at read time.
-  if v_actor_id is not null then
-    select p.full_name
-    into v_actor_name
+  --
+  -- The lookup also decides whether actor_id is stored at all. actor_id carries
+  -- an FK to profiles, so writing a uuid with no profile row would raise a
+  -- foreign_key_violation and take the underlying HR action down with it --
+  -- precisely the coupling ruling point 3 rejects. A claim we cannot resolve is
+  -- therefore recorded as the fallback name with a null actor_id, which is
+  -- visible in the UI rather than fatal.
+  if v_claimed_id is not null then
+    select p.id, p.full_name
+    into v_actor_id, v_actor_name
     from public.profiles as p
-    where p.id = v_actor_id;
+    where p.id = v_claimed_id;
   end if;
 
   -- Two distinct null cases collapse to one visible literal: no JWT claim at

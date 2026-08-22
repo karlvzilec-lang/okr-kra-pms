@@ -4567,6 +4567,11 @@ rollback;
 -- R9-5. The null-actor fallback (ruling point 3). A write with no JWT claim
 --       must produce the visible literal, NOT an error and NOT a blank cell.
 --       Run as owner: no `set local role`, no claim set.
+--
+--       Uses a scope grant rather than a profile edit deliberately: 0011's
+--       restrict_profile_self_updates rejects a claimless profiles UPDATE
+--       before any audit trigger runs, so a profile edit could not reach the
+--       code path under test here.
 -- ----------------------------------------------------------------------------
 begin;
 select set_config('request.jwt.claim.sub', '', true);
@@ -4575,9 +4580,12 @@ declare
   v_actor_id   uuid;
   v_actor_name text;
 begin
-  update public.profiles
-  set is_hr_admin = true
-  where id = '11111111-1111-4111-8111-000000000008';
+  insert into public.review_participant_scope (review_participant_id, scope_type, scope_id)
+  values (
+    '88888888-8888-4888-8888-000000000001',
+    'kra_category',
+    '44444444-4444-4444-8444-00000000000a'
+  );
 
   select al.actor_id, al.actor_name
   into v_actor_id, v_actor_name
@@ -4721,62 +4729,101 @@ rollback;
 -- ----------------------------------------------------------------------------
 -- R9-9. Revoking HR admin logs the mirror event. Symmetry matters: a log that
 --       only records grants cannot answer "when did they lose access".
+--
+--       Maly revokes Lina rather than herself: 0003's profiles_hr_all policy
+--       has `with check (is_hr_admin())`, so a self-demotion updates zero rows
+--       and would make this assertion pass or fail for the wrong reason.
 -- ----------------------------------------------------------------------------
 begin;
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
 do $$
 declare
-  v_row public.audit_log;
+  v_row  public.audit_log;
+  v_rows int;
 begin
   update public.profiles
+  set is_hr_admin = true
+  where id = '11111111-1111-4111-8111-000000000005';  -- Lina promoted
+
+  update public.profiles
   set is_hr_admin = false
-  where id = '11111111-1111-4111-8111-000000000001';  -- Maly demotes herself
+  where id = '11111111-1111-4111-8111-000000000005';  -- and revoked again
+  get diagnostics v_rows = row_count;
+
+  if v_rows <> 1 then
+    raise exception 'R9-9 SETUP FAILED: the revoke updated % rows', v_rows;
+  end if;
 
   select * into v_row
   from public.audit_log
   order by occurred_at desc, id desc
   limit 1;
 
+  if v_row.event_type <> 'profile.hr_admin_changed'::public.audit_event_type then
+    raise exception 'R9-9 FAILED: expected profile.hr_admin_changed, got %', v_row.event_type;
+  end if;
+  if (v_row.old_values ->> 'is_hr_admin')::boolean is not true then
+    raise exception 'R9-9 FAILED: old is_hr_admin was %', v_row.old_values ->> 'is_hr_admin';
+  end if;
   if (v_row.new_values ->> 'is_hr_admin')::boolean is not false then
-    raise exception 'R9-9 FAILED: new is_hr_admin was %', v_row.new_values ->> 'is_hr_admin';
+    raise exception 'R9-9 FAILED: new is_hr_admin was %',
+      coalesce(v_row.new_values ->> 'is_hr_admin', '<NULL>');
   end if;
   if v_row.summary not like '%revoked%' then
     raise exception 'R9-9 FAILED: summary should say revoked: %', v_row.summary;
   end if;
 
-  raise notice 'PASS: R9-9 revoking HR admin logs the mirror event';
+  -- Both directions left their own row: the grant is not overwritten by the
+  -- revoke, which is the entire difference from a status column.
+  select count(*) into v_rows
+  from public.audit_log
+  where event_type = 'profile.hr_admin_changed'::public.audit_event_type;
+
+  if v_rows <> 2 then
+    raise exception 'R9-9 FAILED: expected a grant row AND a revoke row, got %', v_rows;
+  end if;
+
+  raise notice
+    'PASS: R9-9 revoking HR admin logs the mirror event and does not overwrite the earlier grant';
 end $$;
 rollback;
 
 -- ----------------------------------------------------------------------------
 -- R9-10. Two sensitive fields changed in ONE update produce TWO independently
 --        filterable rows, not one merged row (ruling: two independent events).
+--
+--        Counts are taken relative to a baseline: supabase/seed.sql performs a
+--        real matrix-scope grant, so audit_log is legitimately non-empty after
+--        a reset. An absolute count here would be asserting on the seed.
 -- ----------------------------------------------------------------------------
 begin;
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
 do $$
 declare
+  v_before       int;
   v_manager_rows int;
   v_hr_rows      int;
-  v_total        int;
+  v_added        int;
 begin
+  select count(*) into v_before from public.audit_log;
+
   update public.profiles
   set manager_id  = '11111111-1111-4111-8111-000000000003',
       is_hr_admin = true
   where id = '11111111-1111-4111-8111-000000000004';
 
-  select count(*) into v_total from public.audit_log;
+  select count(*) - v_before into v_added from public.audit_log;
   select count(*) into v_manager_rows from public.audit_log
    where event_type = 'profile.manager_changed'::public.audit_event_type;
   select count(*) into v_hr_rows from public.audit_log
    where event_type = 'profile.hr_admin_changed'::public.audit_event_type;
 
-  if v_total <> 2 or v_manager_rows <> 1 or v_hr_rows <> 1 then
+  if v_added <> 2 or v_manager_rows <> 1 or v_hr_rows <> 1 then
     raise exception
-      'R9-10 FAILED: expected 2 rows (1 manager + 1 hr_admin), got % total / % manager / % hr',
-      v_total, v_manager_rows, v_hr_rows;
+      'R9-10 FAILED: expected 2 new rows (1 manager + 1 hr_admin), got % new / % manager / % hr',
+      v_added, v_manager_rows, v_hr_rows;
   end if;
 
   raise notice 'PASS: R9-10 one UPDATE touching both sensitive fields emits two independent events';
@@ -4792,16 +4839,19 @@ set local role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
 do $$
 declare
-  v_rows int;
+  v_before int;
+  v_added  int;
 begin
+  select count(*) into v_before from public.audit_log;
+
   update public.profiles
   set full_name = 'Dara Sok (renamed)'
   where id = '11111111-1111-4111-8111-000000000004';
 
-  select count(*) into v_rows from public.audit_log;
+  select count(*) - v_before into v_added from public.audit_log;
 
-  if v_rows <> 0 then
-    raise exception 'R9-11 FAILED: a non-audited field edit emitted % audit rows', v_rows;
+  if v_added <> 0 then
+    raise exception 'R9-11 FAILED: a non-audited field edit emitted % audit rows', v_added;
   end if;
 
   raise notice 'PASS: R9-11 a non-audited profile field edit emits zero audit rows';
@@ -4817,16 +4867,19 @@ set local role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
 do $$
 declare
-  v_rows int;
+  v_before int;
+  v_added  int;
 begin
+  select count(*) into v_before from public.audit_log;
+
   update public.profiles
   set manager_id = '11111111-1111-4111-8111-000000000002'  -- already Ana
   where id = '11111111-1111-4111-8111-000000000004';
 
-  select count(*) into v_rows from public.audit_log;
+  select count(*) - v_before into v_added from public.audit_log;
 
-  if v_rows <> 0 then
-    raise exception 'R9-12 FAILED: a no-op manager write emitted % audit rows', v_rows;
+  if v_added <> 0 then
+    raise exception 'R9-12 FAILED: a no-op manager write emitted % audit rows', v_added;
   end if;
 
   raise notice 'PASS: R9-12 rewriting a sensitive field with its current value emits nothing';
@@ -5027,16 +5080,19 @@ set local role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
 do $$
 declare
-  v_rows int;
+  v_before int;
+  v_added  int;
 begin
+  select count(*) into v_before from public.audit_log;
+
   update public.employee_goal_plan
   set overall_rating_scale_max = 5
   where id = '33333333-3333-4333-8333-00000000000a';
 
-  select count(*) into v_rows from public.audit_log;
+  select count(*) - v_before into v_added from public.audit_log;
 
-  if v_rows <> 0 then
-    raise exception 'R9-17 FAILED: a non-reversal plan update emitted % audit rows', v_rows;
+  if v_added <> 0 then
+    raise exception 'R9-17 FAILED: a non-reversal plan update emitted % audit rows', v_added;
   end if;
 
   raise notice 'PASS: R9-17 a plan update that is not an unpublish emits zero audit rows';
@@ -5123,16 +5179,22 @@ set local role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
 do $$
 declare
-  v_rows int;
+  v_before int;
+  v_added  int;
 begin
+  select count(*) into v_before from public.audit_log;
+
   update public.profiles
   set is_hr_admin = true
   where id = '11111111-1111-4111-8111-000000000005';
 
-  select count(*) into v_rows from public.audit_log;
+  select count(*) - v_before into v_added from public.audit_log;
 
-  if v_rows <> 1 then
-    raise exception 'R9-19 FAILED: HR admin sees % audit rows, expected 1', v_rows;
+  if v_added <> 1 then
+    raise exception 'R9-19 FAILED: HR admin sees % new audit rows, expected 1', v_added;
+  end if;
+  if v_before < 1 then
+    raise exception 'R9-19 FAILED: HR admin cannot see the seeded audit rows at all';
   end if;
 
   raise notice 'PASS: R9-19 an HR admin can read audit_log';
@@ -5146,17 +5208,22 @@ rollback;
 begin;
 -- Produce a row as owner so its existence is not in doubt.
 select set_config('request.jwt.claim.sub', '', true);
-update public.profiles
-set manager_id = '11111111-1111-4111-8111-000000000003'
-where id = '11111111-1111-4111-8111-000000000004';
+insert into public.review_participant_scope (review_participant_id, scope_type, scope_id)
+values (
+  '88888888-8888-4888-8888-000000000001',
+  'kra_category',
+  '44444444-4444-4444-8444-00000000000a'
+);
 
 do $$
 declare
   v_owner_rows int;
 begin
   select count(*) into v_owner_rows from public.audit_log;
-  if v_owner_rows <> 1 then
-    raise exception 'R9-20 SETUP FAILED: expected 1 seeded audit row, got %', v_owner_rows;
+  if v_owner_rows < 2 then
+    raise exception
+      'R9-20 SETUP FAILED: expected the seeded rows plus the new one, got %',
+      v_owner_rows;
   end if;
 end $$;
 
@@ -5183,9 +5250,12 @@ rollback;
 -- ----------------------------------------------------------------------------
 begin;
 select set_config('request.jwt.claim.sub', '', true);
-update public.profiles
-set is_hr_admin = true
-where id = '11111111-1111-4111-8111-000000000008';
+insert into public.review_participant_scope (review_participant_id, scope_type, scope_id)
+values (
+  '88888888-8888-4888-8888-000000000001',
+  'kra_category',
+  '44444444-4444-4444-8444-00000000000a'
+);
 
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000009', true);
@@ -5210,9 +5280,12 @@ rollback;
 -- ----------------------------------------------------------------------------
 begin;
 select set_config('request.jwt.claim.sub', '', true);
-update public.profiles
-set is_hr_admin = true
-where id = '11111111-1111-4111-8111-000000000008';
+insert into public.review_participant_scope (review_participant_id, scope_type, scope_id)
+values (
+  '88888888-8888-4888-8888-000000000001',
+  'kra_category',
+  '44444444-4444-4444-8444-00000000000a'
+);
 
 do $$
 declare
@@ -5241,15 +5314,21 @@ rollback;
 -- ----------------------------------------------------------------------------
 begin;
 select set_config('request.jwt.claim.sub', '', true);
-update public.profiles
-set is_hr_admin = true
-where id = '11111111-1111-4111-8111-000000000008';
+insert into public.review_participant_scope (review_participant_id, scope_type, scope_id)
+values (
+  '88888888-8888-4888-8888-000000000001',
+  'kra_category',
+  '44444444-4444-4444-8444-00000000000a'
+);
 
 do $$
 declare
   v_raised boolean := false;
-  v_rows   int;
+  v_before int;
+  v_after  int;
 begin
+  select count(*) into v_before from public.audit_log;
+
   begin
     delete from public.audit_log;
   exception
@@ -5264,9 +5343,9 @@ begin
     raise exception 'R9-23 FAILED: the table owner deleted an audit_log row';
   end if;
 
-  select count(*) into v_rows from public.audit_log;
-  if v_rows <> 1 then
-    raise exception 'R9-23 FAILED: the row is gone, % remain', v_rows;
+  select count(*) into v_after from public.audit_log;
+  if v_after <> v_before then
+    raise exception 'R9-23 FAILED: row count moved from % to %', v_before, v_after;
   end if;
 
   raise notice 'PASS: R9-23 DELETE on audit_log is rejected and the row survives';
@@ -5350,53 +5429,66 @@ end $$;
 rollback;
 
 -- ----------------------------------------------------------------------------
--- R9-26. Ordering contract. (occurred_at desc, id desc) must be a TOTAL order:
---        rows written in one statement share now(), so without the id
---        tiebreaker pagination silently repeats or skips rows. Pinned here
---        because the frontend and web/lib/pagination.ts depend on this exact
---        direction.
+-- R9-26. Ordering contract. Two things are pinned here because the frontend and
+--        web/lib/pagination.ts both depend on them:
+--
+--        (a) occurred_at defaults to clock_timestamp(), not now(). Under now()
+--            every row written in one transaction shares a timestamp exactly,
+--            and since id is a random uuid the tiebreaker would then order
+--            same-transaction events arbitrarily instead of chronologically.
+--            That is a real bug, caught by R9-18 before this assertion existed.
+--
+--        (b) (occurred_at desc, id desc) is a TOTAL order, so paging can never
+--            repeat or skip a row even if two rows did share a timestamp.
 -- ----------------------------------------------------------------------------
 begin;
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
 do $$
 declare
-  v_distinct_ts int;
-  v_page_one    uuid[];
-  v_page_two    uuid[];
-  v_all         uuid[];
+  v_manager_at timestamptz;
+  v_hr_at      timestamptz;
+  v_page_one   uuid;
+  v_page_two   uuid;
+  v_all        uuid[];
 begin
-  -- One statement, two rows: same transaction timestamp by construction.
+  -- One statement, two events, in a defined order: manager first, then HR.
   update public.profiles
   set manager_id  = '11111111-1111-4111-8111-000000000003',
       is_hr_admin = true
   where id = '11111111-1111-4111-8111-000000000004';
 
-  select count(distinct occurred_at) into v_distinct_ts from public.audit_log;
-  if v_distinct_ts <> 1 then
+  select occurred_at into v_manager_at from public.audit_log
+   where event_type = 'profile.manager_changed'::public.audit_event_type;
+  select occurred_at into v_hr_at from public.audit_log
+   where event_type = 'profile.hr_admin_changed'::public.audit_event_type;
+
+  if v_manager_at >= v_hr_at then
     raise exception
-      'R9-26 SETUP: expected both rows to share one occurred_at, got % distinct values',
-      v_distinct_ts;
+      'R9-26 FAILED: same-transaction events are not chronologically ordered '
+      '(manager % vs hr %) — occurred_at is probably defaulting to now()',
+      v_manager_at, v_hr_at;
   end if;
 
-  select array_agg(id order by occurred_at desc, id desc) into v_all from public.audit_log;
+  select array_agg(id order by occurred_at desc, id desc) into v_all
+  from public.audit_log;
 
-  select array_agg(t.id) into v_page_one from (
+  select id into v_page_one from (
     select id from public.audit_log order by occurred_at desc, id desc limit 1 offset 0
   ) as t;
-  select array_agg(t.id) into v_page_two from (
+  select id into v_page_two from (
     select id from public.audit_log order by occurred_at desc, id desc limit 1 offset 1
   ) as t;
 
-  if v_page_one[1] <> v_all[1] or v_page_two[1] <> v_all[2] then
+  if v_page_one <> v_all[1] or v_page_two <> v_all[2] then
     raise exception 'R9-26 FAILED: paging does not match the full ordering';
   end if;
-  if v_page_one[1] = v_page_two[1] then
+  if v_page_one = v_page_two then
     raise exception 'R9-26 FAILED: the same row appeared on both pages';
   end if;
 
   raise notice
-    'PASS: R9-26 (occurred_at desc, id desc) is a total order, so paging never repeats or skips a same-timestamp row';
+    'PASS: R9-26 same-transaction events order chronologically and (occurred_at desc, id desc) pages without repeats or gaps';
 end $$;
 rollback;
 
@@ -5432,28 +5524,36 @@ begin
 end $$;
 
 -- ----------------------------------------------------------------------------
--- R9-28. The audit trigger must never block the underlying HR action. The
---        actor is deleted from profiles mid-flight so the name lookup misses;
---        the profile write must still succeed and the row must still land with
---        the fallback name (ruling point 3's whole justification).
+-- R9-28. The audit trigger must never block the underlying write. The actor's
+--        JWT sub resolves to no profiles row at all, so the name lookup misses;
+--        the grant must still succeed and the row must still land with the
+--        fallback name. Under Sol's NOT NULL proposal actor_id would have been
+--        null here and the whole statement would have aborted -- this is ruling
+--        point 3's justification, executed.
 -- ----------------------------------------------------------------------------
 begin;
 select set_config('request.jwt.claim.sub', '99999999-9999-4999-8999-00000000dead', true);
 do $$
 declare
-  v_row public.audit_log;
+  v_row  public.audit_log;
+  v_rows int;
 begin
   -- A JWT sub with no matching profiles row: exactly the "audit layer has a gap
   -- it did not anticipate" case that NOT NULL would have turned into an outage.
-  update public.profiles
-  set is_hr_admin = true
-  where id = '11111111-1111-4111-8111-000000000008';
+  -- actor_id would then violate NOT NULL and abort the whole statement.
+  insert into public.review_participant_scope (review_participant_id, scope_type, scope_id)
+  values (
+    '88888888-8888-4888-8888-000000000001',
+    'kra_category',
+    '44444444-4444-4444-8444-00000000000a'
+  );
 
-  if not (
-    select p.is_hr_admin from public.profiles as p
-    where p.id = '11111111-1111-4111-8111-000000000008'
-  ) then
-    raise exception 'R9-28 FAILED: the HR action itself did not take effect';
+  select count(*) into v_rows
+  from public.review_participant_scope
+  where scope_id = '44444444-4444-4444-8444-00000000000a';
+
+  if v_rows <> 1 then
+    raise exception 'R9-28 FAILED: the underlying grant did not take effect';
   end if;
 
   select * into v_row
@@ -5465,8 +5565,17 @@ begin
     raise exception 'R9-28 FAILED: expected the fallback name, got %', v_row.actor_name;
   end if;
 
+  -- actor_id must be null, not the unresolvable claim: it carries an FK to
+  -- profiles, so storing the raw claim would raise foreign_key_violation and
+  -- abort the grant above.
+  if v_row.actor_id is not null then
+    raise exception
+      'R9-28 FAILED: an unresolvable claim was stored as actor_id (%), which the FK would reject',
+      v_row.actor_id;
+  end if;
+
   raise notice
-    'PASS: R9-28 an unresolvable actor never blocks the HR write; the row lands with the fallback name';
+    'PASS: R9-28 an unresolvable actor never blocks the underlying write; the row lands with the fallback name';
 end $$;
 rollback;
 
