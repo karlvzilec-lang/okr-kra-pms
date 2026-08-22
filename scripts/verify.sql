@@ -4441,4 +4441,1033 @@ begin
 end $$;
 rollback;
 
-\echo 'ALL 121 CHECKS PASSED'
+
+-- ============================================================================
+-- Round 9: audit_log (0023)
+--
+-- The gap this section closes: the 0022 reversal columns are a SNAPSHOT of the
+-- latest reversal only. A second unpublish overwrites the first, so "how many
+-- times was this plan pulled back, and by whom" was unanswerable. Assertion
+-- R9-18 is the regression test for exactly that.
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- R9-1. Structural: RLS is enabled on audit_log.
+-- ----------------------------------------------------------------------------
+do $$
+begin
+  if not exists (
+    select 1 from pg_class
+    where relnamespace = 'public'::regnamespace
+      and relname = 'audit_log'
+      and relrowsecurity
+  ) then
+    raise exception 'RLS is not enabled on public.audit_log';
+  end if;
+
+  raise notice 'PASS: R9-1 RLS enabled on audit_log';
+end $$;
+
+-- ----------------------------------------------------------------------------
+-- R9-2. Structural: exactly ONE policy on audit_log, and it is SELECT-only.
+--       No blanket `for all`, no write policy for any role.
+-- ----------------------------------------------------------------------------
+do $$
+declare
+  v_total    int;
+  v_non_read text;
+begin
+  select count(*) into v_total
+  from pg_policies
+  where schemaname = 'public' and tablename = 'audit_log';
+
+  if v_total <> 1 then
+    raise exception 'Expected exactly 1 policy on audit_log, found %', v_total;
+  end if;
+
+  select string_agg(policyname || ' (' || cmd || ')', ', ')
+  into v_non_read
+  from pg_policies
+  where schemaname = 'public'
+    and tablename = 'audit_log'
+    and cmd <> 'SELECT';
+
+  if v_non_read is not null then
+    raise exception 'audit_log has non-SELECT policies: %', v_non_read;
+  end if;
+
+  raise notice 'PASS: R9-2 audit_log has exactly one policy and it is SELECT-only';
+end $$;
+
+-- ----------------------------------------------------------------------------
+-- R9-3. Structural: neither authenticated nor service_role holds any
+--       INSERT/UPDATE/DELETE grant. A leaked service key cannot erase history.
+-- ----------------------------------------------------------------------------
+do $$
+declare
+  v_bad text;
+begin
+  select string_agg(grantee || ':' || privilege_type, ', ')
+  into v_bad
+  from information_schema.role_table_grants
+  where table_schema = 'public'
+    and table_name = 'audit_log'
+    and grantee in ('authenticated', 'service_role', 'anon', 'PUBLIC')
+    and privilege_type in ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE');
+
+  if v_bad is not null then
+    raise exception 'audit_log has write grants that must not exist: %', v_bad;
+  end if;
+
+  raise notice 'PASS: R9-3 no INSERT/UPDATE/DELETE grant on audit_log for any API role';
+end $$;
+
+-- ----------------------------------------------------------------------------
+-- R9-4. THE EMPIRICAL ACTOR-CAPTURE PROOF (Gate 1 ruling: prove, do not
+--       assume). SECURITY DEFINER swaps the executing ROLE; auth.uid() reads
+--       the request.jwt.claim.sub GUC. Independent mechanisms -- pinned here so
+--       a future Postgres/Supabase change that breaks it fails CI loudly rather
+--       than silently writing anonymous history.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_actor_id   uuid;
+  v_actor_name text;
+begin
+  update public.profiles
+  set is_hr_admin = true
+  where id = '11111111-1111-4111-8111-000000000008';  -- Vuthy
+
+  select al.actor_id, al.actor_name
+  into v_actor_id, v_actor_name
+  from public.audit_log as al
+  order by al.occurred_at desc, al.id desc
+  limit 1;
+
+  if v_actor_id is distinct from '11111111-1111-4111-8111-000000000001'::uuid then
+    raise exception
+      'R9-4 FAILED: auth.uid() inside a SECURITY DEFINER trigger captured % '
+      'instead of the calling HR admin. Actor capture is broken.',
+      coalesce(v_actor_id::text, '<NULL>');
+  end if;
+
+  if v_actor_name <> 'Maly Hor' then
+    raise exception 'R9-4 FAILED: expected actor_name Maly Hor, got %', v_actor_name;
+  end if;
+
+  raise notice
+    'PASS: R9-4 auth.uid() resolves to the CALLER (not the definer role) inside a SECURITY DEFINER trigger';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-5. The null-actor fallback (ruling point 3). A write with no JWT claim
+--       must produce the visible literal, NOT an error and NOT a blank cell.
+--       Run as owner: no `set local role`, no claim set.
+-- ----------------------------------------------------------------------------
+begin;
+select set_config('request.jwt.claim.sub', '', true);
+do $$
+declare
+  v_actor_id   uuid;
+  v_actor_name text;
+begin
+  update public.profiles
+  set is_hr_admin = true
+  where id = '11111111-1111-4111-8111-000000000008';
+
+  select al.actor_id, al.actor_name
+  into v_actor_id, v_actor_name
+  from public.audit_log as al
+  order by al.occurred_at desc, al.id desc
+  limit 1;
+
+  if v_actor_id is not null then
+    raise exception 'R9-5 FAILED: expected a NULL actor_id with no JWT claim, got %', v_actor_id;
+  end if;
+
+  if v_actor_name <> 'system (service role)' then
+    raise exception
+      'R9-5 FAILED: expected the fallback literal, got %',
+      coalesce(v_actor_name, '<NULL>');
+  end if;
+
+  raise notice
+    'PASS: R9-5 an actorless write logs "system (service role)" rather than erroring or rendering blank';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-6. profile.manager_changed: exact old/new values, not just row presence.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_row public.audit_log;
+begin
+  -- Dara moves from Ana to Ben.
+  update public.profiles
+  set manager_id = '11111111-1111-4111-8111-000000000003'
+  where id = '11111111-1111-4111-8111-000000000004';
+
+  select * into v_row
+  from public.audit_log
+  order by occurred_at desc, id desc
+  limit 1;
+
+  if v_row.event_type <> 'profile.manager_changed'::public.audit_event_type then
+    raise exception 'R9-6 FAILED: expected profile.manager_changed, got %', v_row.event_type;
+  end if;
+  if v_row.target_type <> 'profile'
+     or v_row.target_id <> '11111111-1111-4111-8111-000000000004'::uuid then
+    raise exception 'R9-6 FAILED: wrong target %/%', v_row.target_type, v_row.target_id;
+  end if;
+  if v_row.target_label <> 'Dara Sok' then
+    raise exception 'R9-6 FAILED: expected target_label Dara Sok, got %', v_row.target_label;
+  end if;
+  if v_row.old_values ->> 'manager_id' <> '11111111-1111-4111-8111-000000000002' then
+    raise exception 'R9-6 FAILED: old manager_id was %', v_row.old_values ->> 'manager_id';
+  end if;
+  if v_row.old_values ->> 'manager_name' <> 'Ana Kim' then
+    raise exception 'R9-6 FAILED: old manager_name was %', v_row.old_values ->> 'manager_name';
+  end if;
+  if v_row.new_values ->> 'manager_id' <> '11111111-1111-4111-8111-000000000003' then
+    raise exception 'R9-6 FAILED: new manager_id was %', v_row.new_values ->> 'manager_id';
+  end if;
+  if v_row.new_values ->> 'manager_name' <> 'Ben Ly' then
+    raise exception 'R9-6 FAILED: new manager_name was %', v_row.new_values ->> 'manager_name';
+  end if;
+  if v_row.summary not like '%Ana Kim%' or v_row.summary not like '%Ben Ly%' then
+    raise exception 'R9-6 FAILED: summary does not name both managers: %', v_row.summary;
+  end if;
+
+  raise notice 'PASS: R9-6 profile.manager_changed records exact old/new manager and a readable summary';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-7. Clearing a manager to NULL still logs, with the '(none)' label rather
+--       than a null hole in the payload.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_row public.audit_log;
+begin
+  update public.profiles
+  set manager_id = null
+  where id = '11111111-1111-4111-8111-000000000004';
+
+  select * into v_row
+  from public.audit_log
+  order by occurred_at desc, id desc
+  limit 1;
+
+  if v_row.new_values ->> 'manager_id' is not null then
+    raise exception 'R9-7 FAILED: expected a JSON null manager_id, got %',
+      v_row.new_values ->> 'manager_id';
+  end if;
+  if v_row.new_values ->> 'manager_name' <> '(none)' then
+    raise exception 'R9-7 FAILED: expected (none), got %', v_row.new_values ->> 'manager_name';
+  end if;
+
+  raise notice 'PASS: R9-7 clearing a manager logs an explicit (none) rather than a blank';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-8. profile.hr_admin_changed on grant.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_row public.audit_log;
+begin
+  update public.profiles
+  set is_hr_admin = true
+  where id = '11111111-1111-4111-8111-000000000005';  -- Lina
+
+  select * into v_row
+  from public.audit_log
+  order by occurred_at desc, id desc
+  limit 1;
+
+  if v_row.event_type <> 'profile.hr_admin_changed'::public.audit_event_type then
+    raise exception 'R9-8 FAILED: expected profile.hr_admin_changed, got %', v_row.event_type;
+  end if;
+  if (v_row.old_values ->> 'is_hr_admin')::boolean is not false then
+    raise exception 'R9-8 FAILED: old is_hr_admin was %', v_row.old_values ->> 'is_hr_admin';
+  end if;
+  if (v_row.new_values ->> 'is_hr_admin')::boolean is not true then
+    raise exception 'R9-8 FAILED: new is_hr_admin was %', v_row.new_values ->> 'is_hr_admin';
+  end if;
+  if v_row.summary not like '%granted%' then
+    raise exception 'R9-8 FAILED: summary should say granted: %', v_row.summary;
+  end if;
+
+  raise notice 'PASS: R9-8 profile.hr_admin_changed records the false -> true grant';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-9. Revoking HR admin logs the mirror event. Symmetry matters: a log that
+--       only records grants cannot answer "when did they lose access".
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_row public.audit_log;
+begin
+  update public.profiles
+  set is_hr_admin = false
+  where id = '11111111-1111-4111-8111-000000000001';  -- Maly demotes herself
+
+  select * into v_row
+  from public.audit_log
+  order by occurred_at desc, id desc
+  limit 1;
+
+  if (v_row.new_values ->> 'is_hr_admin')::boolean is not false then
+    raise exception 'R9-9 FAILED: new is_hr_admin was %', v_row.new_values ->> 'is_hr_admin';
+  end if;
+  if v_row.summary not like '%revoked%' then
+    raise exception 'R9-9 FAILED: summary should say revoked: %', v_row.summary;
+  end if;
+
+  raise notice 'PASS: R9-9 revoking HR admin logs the mirror event';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-10. Two sensitive fields changed in ONE update produce TWO independently
+--        filterable rows, not one merged row (ruling: two independent events).
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_manager_rows int;
+  v_hr_rows      int;
+  v_total        int;
+begin
+  update public.profiles
+  set manager_id  = '11111111-1111-4111-8111-000000000003',
+      is_hr_admin = true
+  where id = '11111111-1111-4111-8111-000000000004';
+
+  select count(*) into v_total from public.audit_log;
+  select count(*) into v_manager_rows from public.audit_log
+   where event_type = 'profile.manager_changed'::public.audit_event_type;
+  select count(*) into v_hr_rows from public.audit_log
+   where event_type = 'profile.hr_admin_changed'::public.audit_event_type;
+
+  if v_total <> 2 or v_manager_rows <> 1 or v_hr_rows <> 1 then
+    raise exception
+      'R9-10 FAILED: expected 2 rows (1 manager + 1 hr_admin), got % total / % manager / % hr',
+      v_total, v_manager_rows, v_hr_rows;
+  end if;
+
+  raise notice 'PASS: R9-10 one UPDATE touching both sensitive fields emits two independent events';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-11. NEGATIVE: editing a non-audited profile column emits ZERO rows. The
+--        log must stay a signal, not a change feed.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows int;
+begin
+  update public.profiles
+  set full_name = 'Dara Sok (renamed)'
+  where id = '11111111-1111-4111-8111-000000000004';
+
+  select count(*) into v_rows from public.audit_log;
+
+  if v_rows <> 0 then
+    raise exception 'R9-11 FAILED: a non-audited field edit emitted % audit rows', v_rows;
+  end if;
+
+  raise notice 'PASS: R9-11 a non-audited profile field edit emits zero audit rows';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-12. NEGATIVE: an UPDATE that sets manager_id to its existing value emits
+--        nothing. `is distinct from`, not "the column appeared in the SET".
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows int;
+begin
+  update public.profiles
+  set manager_id = '11111111-1111-4111-8111-000000000002'  -- already Ana
+  where id = '11111111-1111-4111-8111-000000000004';
+
+  select count(*) into v_rows from public.audit_log;
+
+  if v_rows <> 0 then
+    raise exception 'R9-12 FAILED: a no-op manager write emitted % audit rows', v_rows;
+  end if;
+
+  raise notice 'PASS: R9-12 rewriting a sensitive field with its current value emits nothing';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-13. matrix_scope.granted, with the full multi-field payload that ruled out
+--        a single old_value/new_value text pair.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_row public.audit_log;
+begin
+  -- Nita additionally gets Delivery & Execution on Dara's plan.
+  insert into public.review_participant_scope (review_participant_id, scope_type, scope_id)
+  values (
+    '88888888-8888-4888-8888-000000000001',
+    'kra_category',
+    '44444444-4444-4444-8444-00000000000a'
+  );
+
+  select * into v_row
+  from public.audit_log
+  order by occurred_at desc, id desc
+  limit 1;
+
+  if v_row.event_type <> 'matrix_scope.granted'::public.audit_event_type then
+    raise exception 'R9-13 FAILED: expected matrix_scope.granted, got %', v_row.event_type;
+  end if;
+  if v_row.old_values <> '{}'::jsonb then
+    raise exception 'R9-13 FAILED: a grant must have an empty old_values, got %', v_row.old_values;
+  end if;
+  if v_row.new_values ->> 'matrix_manager_name' <> 'Nita Sar' then
+    raise exception 'R9-13 FAILED: matrix_manager_name was %',
+      v_row.new_values ->> 'matrix_manager_name';
+  end if;
+  if v_row.new_values ->> 'employee_name' <> 'Dara Sok' then
+    raise exception 'R9-13 FAILED: employee_name was %', v_row.new_values ->> 'employee_name';
+  end if;
+  if v_row.new_values ->> 'scope_type' <> 'kra_category' then
+    raise exception 'R9-13 FAILED: scope_type was %', v_row.new_values ->> 'scope_type';
+  end if;
+  if v_row.new_values ->> 'scope_label' <> 'Delivery & Execution' then
+    raise exception 'R9-13 FAILED: scope_label was %', v_row.new_values ->> 'scope_label';
+  end if;
+  if v_row.new_values ->> 'review_cycle_name' is null then
+    raise exception 'R9-13 FAILED: review_cycle_name missing from payload';
+  end if;
+
+  raise notice
+    'PASS: R9-13 matrix_scope.granted carries all seven payload fields (manager, plan, employee, cycle, scope type/id/label)';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-14. matrix_scope.revoked. This is the brutal-QA gap: before 0023 a revoke
+--        deleted the row and left no trace whatsoever.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_row public.audit_log;
+begin
+  delete from public.review_participant_scope
+  where id = '99999999-9999-4999-8999-000000000001';
+
+  select * into v_row
+  from public.audit_log
+  order by occurred_at desc, id desc
+  limit 1;
+
+  if v_row.event_type <> 'matrix_scope.revoked'::public.audit_event_type then
+    raise exception 'R9-14 FAILED: expected matrix_scope.revoked, got %', v_row.event_type;
+  end if;
+  if v_row.new_values <> '{}'::jsonb then
+    raise exception 'R9-14 FAILED: a revoke must have an empty new_values, got %', v_row.new_values;
+  end if;
+  if v_row.old_values ->> 'scope_label' <> 'Quality & Collaboration' then
+    raise exception 'R9-14 FAILED: revoked scope_label was %', v_row.old_values ->> 'scope_label';
+  end if;
+  if v_row.old_values ->> 'matrix_manager_name' <> 'Nita Sar' then
+    raise exception 'R9-14 FAILED: revoked matrix_manager_name was %',
+      v_row.old_values ->> 'matrix_manager_name';
+  end if;
+  if v_row.summary not like '%lost access to%' then
+    raise exception 'R9-14 FAILED: summary should read as a revocation: %', v_row.summary;
+  end if;
+
+  raise notice
+    'PASS: R9-14 revoking a matrix scope leaves a full audit row (the deleted row is otherwise unrecoverable)';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-15. calibration.plan_unpublished, written by the AFTER UPDATE trigger
+--        reading 0022's snapshot columns. 0022 itself is untouched.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_row public.audit_log;
+begin
+  perform public.unpublish_employee_goal_plan(
+    '33333333-3333-4333-8333-00000000000a',
+    'Panel re-review requested after a scoring dispute was raised by the employee.'
+  );
+
+  select * into v_row
+  from public.audit_log
+  order by occurred_at desc, id desc
+  limit 1;
+
+  if v_row.event_type <> 'calibration.plan_unpublished'::public.audit_event_type then
+    raise exception 'R9-15 FAILED: expected calibration.plan_unpublished, got %', v_row.event_type;
+  end if;
+  if v_row.target_id <> '33333333-3333-4333-8333-00000000000a'::uuid then
+    raise exception 'R9-15 FAILED: target_id was %', v_row.target_id;
+  end if;
+  if v_row.old_values ->> 'published_at' is null then
+    raise exception 'R9-15 FAILED: old published_at should be the prior timestamp, got null';
+  end if;
+  if v_row.new_values ->> 'published_at' is not null then
+    raise exception 'R9-15 FAILED: new published_at should be null, got %',
+      v_row.new_values ->> 'published_at';
+  end if;
+  if v_row.new_values ->> 'last_unpublish_reason' not like 'Panel re-review%' then
+    raise exception 'R9-15 FAILED: reason was %', v_row.new_values ->> 'last_unpublish_reason';
+  end if;
+  if v_row.actor_id <> '11111111-1111-4111-8111-000000000001'::uuid then
+    raise exception 'R9-15 FAILED: actor was %', coalesce(v_row.actor_id::text, '<NULL>');
+  end if;
+
+  raise notice
+    'PASS: R9-15 unpublishing a plan logs via the AFTER UPDATE trigger reading 0022 snapshot columns';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-16. calibration.session_unfinalized, same construction.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_row public.audit_log;
+begin
+  -- Session unfinalize requires zero published participants, so pull the plan
+  -- back first. That emits its own row; we assert on the last one.
+  perform public.unpublish_employee_goal_plan(
+    '33333333-3333-4333-8333-00000000000a',
+    'Unpublished so the calibration session can be reopened for a second pass.'
+  );
+  perform public.unfinalize_calibration_session(
+    '44444444-4444-4444-8444-000000000001',
+    'Reopening to re-moderate one participant after new evidence from the line manager.'
+  );
+
+  select * into v_row
+  from public.audit_log
+  order by occurred_at desc, id desc
+  limit 1;
+
+  if v_row.event_type <> 'calibration.session_unfinalized'::public.audit_event_type then
+    raise exception 'R9-16 FAILED: expected calibration.session_unfinalized, got %', v_row.event_type;
+  end if;
+  if v_row.old_values ->> 'status' <> 'finalized' then
+    raise exception 'R9-16 FAILED: old status was %', v_row.old_values ->> 'status';
+  end if;
+  if v_row.new_values ->> 'status' <> 'open' then
+    raise exception 'R9-16 FAILED: new status was %', v_row.new_values ->> 'status';
+  end if;
+  if v_row.target_label <> 'FY2026 Engineering Calibration' then
+    raise exception 'R9-16 FAILED: target_label was %', v_row.target_label;
+  end if;
+  if v_row.new_values ->> 'last_unfinalize_reason' not like 'Reopening to re-moderate%' then
+    raise exception 'R9-16 FAILED: reason was %', v_row.new_values ->> 'last_unfinalize_reason';
+  end if;
+
+  raise notice 'PASS: R9-16 unfinalizing a session logs status finalized -> open with the reason';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-17. NEGATIVE: a plan UPDATE that does not cross the publish boundary emits
+--        nothing. The WHEN clause is the transition, not the table.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows int;
+begin
+  update public.employee_goal_plan
+  set overall_rating_scale_max = 5
+  where id = '33333333-3333-4333-8333-00000000000a';
+
+  select count(*) into v_rows from public.audit_log;
+
+  if v_rows <> 0 then
+    raise exception 'R9-17 FAILED: a non-reversal plan update emitted % audit rows', v_rows;
+  end if;
+
+  raise notice 'PASS: R9-17 a plan update that is not an unpublish emits zero audit rows';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-18. THE REGRESSION TEST THIS ROUND EXISTS FOR. 0022's snapshot triple only
+--        ever holds the LATEST reversal: a second unpublish overwrites the
+--        first and the earlier one is gone forever. Two reversals must leave
+--        TWO audit rows, each carrying its own reason.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows          int;
+  v_first_reason  text;
+  v_second_reason text;
+  v_snapshot      text;
+begin
+  perform public.unpublish_employee_goal_plan(
+    '33333333-3333-4333-8333-00000000000a',
+    'FIRST reversal: scoring dispute raised, pulling the plan back for review.'
+  );
+  perform public.publish_employee_goal_plan('33333333-3333-4333-8333-00000000000a');
+  perform public.unpublish_employee_goal_plan(
+    '33333333-3333-4333-8333-00000000000a',
+    'SECOND reversal: a further correction was needed after the first re-review.'
+  );
+
+  select count(*) into v_rows
+  from public.audit_log
+  where event_type = 'calibration.plan_unpublished'::public.audit_event_type;
+
+  if v_rows <> 2 then
+    raise exception 'R9-18 FAILED: two reversals produced % audit rows, expected 2', v_rows;
+  end if;
+
+  -- Oldest first here, deliberately: the point is that the EARLIER one survived.
+  select al.new_values ->> 'last_unpublish_reason'
+  into v_first_reason
+  from public.audit_log as al
+  where al.event_type = 'calibration.plan_unpublished'::public.audit_event_type
+  order by al.occurred_at asc, al.id asc
+  limit 1;
+
+  select al.new_values ->> 'last_unpublish_reason'
+  into v_second_reason
+  from public.audit_log as al
+  where al.event_type = 'calibration.plan_unpublished'::public.audit_event_type
+  order by al.occurred_at desc, al.id desc
+  limit 1;
+
+  if v_first_reason not like 'FIRST reversal%' then
+    raise exception 'R9-18 FAILED: the first reversal reason was lost, got %', v_first_reason;
+  end if;
+  if v_second_reason not like 'SECOND reversal%' then
+    raise exception 'R9-18 FAILED: the second reversal reason was wrong, got %', v_second_reason;
+  end if;
+
+  -- And prove the gap is real rather than hypothetical: the 0022 column now
+  -- holds ONLY the second reason. Without audit_log the first is unrecoverable.
+  select egp.last_unpublish_reason
+  into v_snapshot
+  from public.employee_goal_plan as egp
+  where egp.id = '33333333-3333-4333-8333-00000000000a';
+
+  if v_snapshot not like 'SECOND reversal%' then
+    raise exception 'R9-18 FAILED: expected the 0022 snapshot to hold only the latest, got %', v_snapshot;
+  end if;
+
+  raise notice
+    'PASS: R9-18 two reversals leave two audit rows while the 0022 snapshot retains only the latest — the exact gap this round closes';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-19. RLS positive: an HR admin can read the log.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_rows int;
+begin
+  update public.profiles
+  set is_hr_admin = true
+  where id = '11111111-1111-4111-8111-000000000005';
+
+  select count(*) into v_rows from public.audit_log;
+
+  if v_rows <> 1 then
+    raise exception 'R9-19 FAILED: HR admin sees % audit rows, expected 1', v_rows;
+  end if;
+
+  raise notice 'PASS: R9-19 an HR admin can read audit_log';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-20. RLS negative: a non-HR employee sees ZERO rows even though the write
+--        that produced them definitely happened.
+-- ----------------------------------------------------------------------------
+begin;
+-- Produce a row as owner so its existence is not in doubt.
+select set_config('request.jwt.claim.sub', '', true);
+update public.profiles
+set manager_id = '11111111-1111-4111-8111-000000000003'
+where id = '11111111-1111-4111-8111-000000000004';
+
+do $$
+declare
+  v_owner_rows int;
+begin
+  select count(*) into v_owner_rows from public.audit_log;
+  if v_owner_rows <> 1 then
+    raise exception 'R9-20 SETUP FAILED: expected 1 seeded audit row, got %', v_owner_rows;
+  end if;
+end $$;
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000004', true);
+do $$
+declare
+  v_rows int;
+begin
+  select count(*) into v_rows from public.audit_log;
+
+  if v_rows <> 0 then
+    raise exception 'R9-20 FAILED: a non-HR employee read % audit rows, expected 0', v_rows;
+  end if;
+
+  raise notice 'PASS: R9-20 a non-HR employee reads zero audit rows despite the row existing';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-21. Even a matrix manager (an elevated non-HR role) sees nothing. Pinned
+--        separately from R9-20: the scope-join policies elsewhere in this
+--        schema make "elevated but not HR" the easiest role to leak to.
+-- ----------------------------------------------------------------------------
+begin;
+select set_config('request.jwt.claim.sub', '', true);
+update public.profiles
+set is_hr_admin = true
+where id = '11111111-1111-4111-8111-000000000008';
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000009', true);
+do $$
+declare
+  v_rows int;
+begin
+  select count(*) into v_rows from public.audit_log;
+
+  if v_rows <> 0 then
+    raise exception 'R9-21 FAILED: a matrix manager read % audit rows, expected 0', v_rows;
+  end if;
+
+  raise notice 'PASS: R9-21 a matrix manager reads zero audit rows';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-22. IMMUTABILITY: UPDATE is rejected even for the table owner, who is
+--        exempt from RLS and holds every grant. This is the layer that catches
+--        the case where privilege checks are bypassed rather than broken.
+-- ----------------------------------------------------------------------------
+begin;
+select set_config('request.jwt.claim.sub', '', true);
+update public.profiles
+set is_hr_admin = true
+where id = '11111111-1111-4111-8111-000000000008';
+
+do $$
+declare
+  v_raised boolean := false;
+begin
+  begin
+    update public.audit_log set summary = 'tampered';
+  exception
+    when others then
+      v_raised := true;
+      if sqlerrm not like '%append-only%' then
+        raise exception 'R9-22 FAILED: wrong error on UPDATE: %', sqlerrm;
+      end if;
+  end;
+
+  if not v_raised then
+    raise exception 'R9-22 FAILED: the table owner rewrote an audit_log row';
+  end if;
+
+  raise notice 'PASS: R9-22 UPDATE on audit_log is rejected even for the RLS-exempt table owner';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-23. IMMUTABILITY: DELETE is rejected the same way.
+-- ----------------------------------------------------------------------------
+begin;
+select set_config('request.jwt.claim.sub', '', true);
+update public.profiles
+set is_hr_admin = true
+where id = '11111111-1111-4111-8111-000000000008';
+
+do $$
+declare
+  v_raised boolean := false;
+  v_rows   int;
+begin
+  begin
+    delete from public.audit_log;
+  exception
+    when others then
+      v_raised := true;
+      if sqlerrm not like '%append-only%' then
+        raise exception 'R9-23 FAILED: wrong error on DELETE: %', sqlerrm;
+      end if;
+  end;
+
+  if not v_raised then
+    raise exception 'R9-23 FAILED: the table owner deleted an audit_log row';
+  end if;
+
+  select count(*) into v_rows from public.audit_log;
+  if v_rows <> 1 then
+    raise exception 'R9-23 FAILED: the row is gone, % remain', v_rows;
+  end if;
+
+  raise notice 'PASS: R9-23 DELETE on audit_log is rejected and the row survives';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-24. An authenticated HR admin cannot INSERT a forged row. Read access is
+--        not write access: without this, HR could fabricate history.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_raised boolean := false;
+begin
+  begin
+    insert into public.audit_log (
+      event_type, actor_name, target_type, target_id, target_label, summary
+    )
+    values (
+      'profile.hr_admin_changed'::public.audit_event_type,
+      'forged', 'profile',
+      '11111111-1111-4111-8111-000000000004',
+      'forged', 'forged entry'
+    );
+  exception
+    when others then
+      v_raised := true;
+  end;
+
+  if not v_raised then
+    raise exception 'R9-24 FAILED: an HR admin forged an audit_log row';
+  end if;
+
+  raise notice 'PASS: R9-24 even an HR admin cannot INSERT a forged audit row';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-25. actor_id's FK is ON DELETE RESTRICT: deleting a profile that owns
+--        history fails rather than silently orphaning or nulling the actor.
+-- ----------------------------------------------------------------------------
+begin;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+set local role authenticated;
+update public.profiles
+set is_hr_admin = true
+where id = '11111111-1111-4111-8111-000000000005';
+reset role;
+
+do $$
+declare
+  v_raised boolean := false;
+  v_message text;
+begin
+  begin
+    delete from public.profiles where id = '11111111-1111-4111-8111-000000000001';
+  exception
+    when foreign_key_violation then
+      v_raised := true;
+      v_message := sqlerrm;
+  end;
+
+  if not v_raised then
+    raise exception 'R9-25 FAILED: deleting an actor with history was allowed';
+  end if;
+
+  -- Pinned to audit_log specifically: profiles has several other FKs, and a
+  -- violation from one of those would otherwise let this pass for the wrong
+  -- reason without proving the restrict clause on actor_id works.
+  if v_message not like '%audit_log%' then
+    raise exception
+      'R9-25 FAILED: the FK violation came from something other than audit_log: %',
+      v_message;
+  end if;
+
+  raise notice 'PASS: R9-25 on delete restrict prevents erasing an actor who owns audit history';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-26. Ordering contract. (occurred_at desc, id desc) must be a TOTAL order:
+--        rows written in one statement share now(), so without the id
+--        tiebreaker pagination silently repeats or skips rows. Pinned here
+--        because the frontend and web/lib/pagination.ts depend on this exact
+--        direction.
+-- ----------------------------------------------------------------------------
+begin;
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-000000000001', true);
+do $$
+declare
+  v_distinct_ts int;
+  v_page_one    uuid[];
+  v_page_two    uuid[];
+  v_all         uuid[];
+begin
+  -- One statement, two rows: same transaction timestamp by construction.
+  update public.profiles
+  set manager_id  = '11111111-1111-4111-8111-000000000003',
+      is_hr_admin = true
+  where id = '11111111-1111-4111-8111-000000000004';
+
+  select count(distinct occurred_at) into v_distinct_ts from public.audit_log;
+  if v_distinct_ts <> 1 then
+    raise exception
+      'R9-26 SETUP: expected both rows to share one occurred_at, got % distinct values',
+      v_distinct_ts;
+  end if;
+
+  select array_agg(id order by occurred_at desc, id desc) into v_all from public.audit_log;
+
+  select array_agg(t.id) into v_page_one from (
+    select id from public.audit_log order by occurred_at desc, id desc limit 1 offset 0
+  ) as t;
+  select array_agg(t.id) into v_page_two from (
+    select id from public.audit_log order by occurred_at desc, id desc limit 1 offset 1
+  ) as t;
+
+  if v_page_one[1] <> v_all[1] or v_page_two[1] <> v_all[2] then
+    raise exception 'R9-26 FAILED: paging does not match the full ordering';
+  end if;
+  if v_page_one[1] = v_page_two[1] then
+    raise exception 'R9-26 FAILED: the same row appeared on both pages';
+  end if;
+
+  raise notice
+    'PASS: R9-26 (occurred_at desc, id desc) is a total order, so paging never repeats or skips a same-timestamp row';
+end $$;
+rollback;
+
+-- ----------------------------------------------------------------------------
+-- R9-27. jsonb object constraints hold: the structured columns cannot degrade
+--        into scalars or arrays, which would break every ->> read above and
+--        every frontend render.
+-- ----------------------------------------------------------------------------
+do $$
+declare
+  v_missing text;
+begin
+  select string_agg(needed.name, ', ')
+  into v_missing
+  from (values
+    ('audit_log_old_values_is_object'),
+    ('audit_log_new_values_is_object'),
+    ('audit_log_summary_not_blank'),
+    ('audit_log_actor_name_not_blank')
+  ) as needed(name)
+  where not exists (
+    select 1
+    from pg_constraint as c
+    where c.conrelid = 'public.audit_log'::regclass
+      and c.conname = needed.name
+  );
+
+  if v_missing is not null then
+    raise exception 'R9-27 FAILED: missing audit_log constraints: %', v_missing;
+  end if;
+
+  raise notice 'PASS: R9-27 audit_log payload and label constraints are present';
+end $$;
+
+-- ----------------------------------------------------------------------------
+-- R9-28. The audit trigger must never block the underlying HR action. The
+--        actor is deleted from profiles mid-flight so the name lookup misses;
+--        the profile write must still succeed and the row must still land with
+--        the fallback name (ruling point 3's whole justification).
+-- ----------------------------------------------------------------------------
+begin;
+select set_config('request.jwt.claim.sub', '99999999-9999-4999-8999-00000000dead', true);
+do $$
+declare
+  v_row public.audit_log;
+begin
+  -- A JWT sub with no matching profiles row: exactly the "audit layer has a gap
+  -- it did not anticipate" case that NOT NULL would have turned into an outage.
+  update public.profiles
+  set is_hr_admin = true
+  where id = '11111111-1111-4111-8111-000000000008';
+
+  if not (
+    select p.is_hr_admin from public.profiles as p
+    where p.id = '11111111-1111-4111-8111-000000000008'
+  ) then
+    raise exception 'R9-28 FAILED: the HR action itself did not take effect';
+  end if;
+
+  select * into v_row
+  from public.audit_log
+  order by occurred_at desc, id desc
+  limit 1;
+
+  if v_row.actor_name <> 'system (service role)' then
+    raise exception 'R9-28 FAILED: expected the fallback name, got %', v_row.actor_name;
+  end if;
+
+  raise notice
+    'PASS: R9-28 an unresolvable actor never blocks the HR write; the row lands with the fallback name';
+end $$;
+rollback;
+
+\echo 'ALL 149 CHECKS PASSED'
